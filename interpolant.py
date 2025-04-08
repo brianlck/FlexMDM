@@ -57,7 +57,7 @@ class SemiAutoregressiveInterpolant(abc.ABC):
         jumps = torch.rand(B, L, device=x1.device)
         jumps = torch.where(id < x1_lens.unsqueeze(1), jumps, 1.5)
         sorted, _ = torch.sort(jumps, dim=1)
-        d = (sorted < t).sum(dim=1)
+        d = (sorted < t.unsqueeze(1)).sum(dim=1)
 
         p = (t.unsqueeze(1) - sorted) / (1 - sorted)
         p = p.clamp(0.0, 1.0)
@@ -70,13 +70,13 @@ class SemiAutoregressiveInterpolant(abc.ABC):
 
     def conditional_rate(self, xt, st, t, x1) -> SemiAutoregressiveRate:
         B, L = x1.shape
-        unmask_rate = torch.zeros((B, L, self.vocab_size))
+        unmask_rate = torch.zeros((B, L, self.vocab_size), device=x1.device)
         rate = 1 / (1.0 - t)
         unmask_rate.scatter_(
             2,
             # Filter pad_tokens
             rearrange(torch.where(xt != self.pad_token, x1, 0), "b l -> b l 1"),
-            rearrange(torch.where(xt == self.mask_token, rate, 0.0), "b l -> b l 1"),
+            rearrange(torch.where(xt == self.mask_token, rate.unsqueeze(1), 0.0), "b l -> b l 1"),
         )
         x1_len = (x1 != self.pad_token).sum(dim=1)
         xt_len = (xt != self.pad_token).sum(dim=1)

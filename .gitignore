@@ -9,3 +9,10 @@ wheels/
 # Virtual environments
 .venv
 .python-version
+
+
+# Training checkpoints
+checkpoints/
+
+# Lightning logs
+lightning_logs/

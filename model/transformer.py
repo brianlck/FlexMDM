@@ -6,8 +6,6 @@ import math
 
 from einops import rearrange
 from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
-# from flash_attn.ops.fused_dense import FusedMLP, FusedDense
-from huggingface_hub import PyTorchModelHubMixin
 from omegaconf import OmegaConf
 
 from . import rotary
@@ -192,10 +190,6 @@ class DDiTBlock(nn.Module):
 
 class EmbeddingLayer(nn.Module):
     def __init__(self, dim, vocab_dim):
-        """
-        Mode arg: 0 -> use a learned layer, 1 -> use eigenvectors, 
-        2-> add in eigenvectors, 3 -> use pretrained embedding matrix
-        """
         super().__init__()
         self.embedding = nn.Parameter(torch.empty((vocab_dim, dim)))
         torch.nn.init.kaiming_uniform_(self.embedding, a=math.sqrt(5))
@@ -224,7 +218,26 @@ class DDitFinalLayer(nn.Module):
         return x
 
 
-class SEDD(nn.Module, PyTorchModelHubMixin):
+class ScalarHead(nn.Module):
+    def __init__(self, hidden_size, cond_dim):
+        super().__init__()
+        self.norm = LayerNorm(hidden_size)
+        self.pool = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, 1)
+        )
+        self.adaLN = nn.Linear(cond_dim, 2 * hidden_size, bias=True)
+        self.adaLN.weight.data.zero_()
+        self.adaLN.bias.data.zero_()
+
+    def forward(self, x, c):
+        shift, scale = self.adaLN(c)[:, None].chunk(2, dim=2)
+        x = modulate_fused(self.norm(x), shift, scale)
+        return self.pool(x.mean(dim=1)).squeeze(-1)
+
+
+class SemiAutoregressiveFlow(nn.Module):
     def __init__(self, config):
         super().__init__()
 
@@ -234,10 +247,9 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
 
         self.config = config
 
-        self.absorb = config.graph.type == "absorb"
-        vocab_size = config.tokens + (1 if self.absorb else 0)
+        vocab_size = config.tokens
 
-        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, vocab_size)
+        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, vocab_size + 1)
         self.sigma_map = TimestepEmbedder(config.model.cond_dim)
         self.rotary_emb = rotary.Rotary(config.model.hidden_size // config.model.n_heads)
 
@@ -246,7 +258,8 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
         ])
 
         self.output_layer = DDitFinalLayer(config.model.hidden_size, vocab_size, config.model.cond_dim)
-        self.scale_by_sigma = config.model.scale_by_sigma
+        # Default to per-sequence scalar prediction
+        self.scalar_head = ScalarHead(config.model.hidden_size, config.model.cond_dim)
 
     
     def _get_bias_dropout_scale(self):
@@ -268,14 +281,8 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
             for i in range(len(self.blocks)):
                 x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
 
-            x = self.output_layer(x, c)
+            unmask_rate = F.softplus(self.output_layer(x, c))
+            len_rate = F.softplus(self.scalar_head(x, c))
 
-
-        if self.scale_by_sigma:
-            assert self.absorb, "Haven't configured this to work."
-            esigm1_log = torch.where(sigma < 0.5, torch.expm1(sigma), sigma.exp() - 1).log().to(x.dtype)[:, None, None]
-            x = x - esigm1_log - np.log(x.shape[-1] - 1)# this will be approximately averaged at 0
-            
-        x = torch.scatter(x, -1, indices[..., None], torch.zeros_like(x[..., :1]))
-
-        return x
+        return unmask_rate, len_rate
+    
