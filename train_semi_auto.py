@@ -24,7 +24,6 @@ config = OmegaConf.create({
         'cond_dim': 64,
         'dropout': 0.1,
         'n_blocks': 4,
-        'scale_by_sigma': True
     }
 })
 
