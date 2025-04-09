@@ -1,8 +1,24 @@
-### Extra installation instruction
-To use flash attention, what may have to do the following
+### Dependency management
+This repository uses the uv package manager
+To install uv pleaes refer to the official uv website and remember to add the uv binary to $PATH
+
+Installing dependency is as simple as,
+```
+uv sync
+```
+
+The Flash Attention build script is not compatible with uv and require you CUDA 11.4+
+
+To properly install Flash Attentoin:
+
+1. Load CUDA 
+```
+module load cuda/12.4.1-fasrc01
+```
+
+2. Install FlashAttention build script dependencies and build with --no-build-isolation
 ```
 uv pip install torch setuptools
-uv sync
 uv add flash-attn --no-build-isolation
+uv sync
 ```
-due the FlashAttention using deprecated build tools
