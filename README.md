@@ -1,6 +1,6 @@
 ### Dependency management
 This repository uses the uv package manager
-To install uv pleaes refer to the official uv website and remember to add the uv binary to $PATH
+To install uv pleaes refer to the official uv website and make sure to add the uv binary to $PATH.
 
 Installing dependency is as simple as,
 ```
@@ -21,4 +21,16 @@ module load cuda/12.4.1-fasrc01
 uv pip install torch setuptools
 uv add flash-attn --no-build-isolation
 uv sync
+```
+
+
+### Instructions for using VSCode Jupyter Notebook for testing
+Notebooks are provided to play with the sampling algorithms with trained models.
+To use VSCode Jupyter with GPUs, the easiest way is to login to a compute node and tunnel to VSCode.
+This is very easy to do on VSCode code server,
+
+```
+salloc [GPU Things]
+module load vscode
+code tunnel
 ```
