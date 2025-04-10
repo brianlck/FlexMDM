@@ -2,6 +2,7 @@
 import torch
 
 def mse(x, y):
-    return torch.mean((x - y) ** 2)
+    sq_diff = (x - y) ** 2
+    return sq_diff.reshape(sq_diff.size(0), -1).sum(dim=-1)
 
 

@@ -221,12 +221,8 @@ class DDitFinalLayer(nn.Module):
 class ScalarHead(nn.Module):
     def __init__(self, hidden_size, cond_dim):
         super().__init__()
+        self.linear = nn.Linear(hidden_size, 1)
         self.norm = LayerNorm(hidden_size)
-        self.pool = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.GELU(),
-            nn.Linear(hidden_size, 1)
-        )
         self.adaLN = nn.Linear(cond_dim, 2 * hidden_size, bias=True)
         self.adaLN.weight.data.zero_()
         self.adaLN.bias.data.zero_()
@@ -234,7 +230,8 @@ class ScalarHead(nn.Module):
     def forward(self, x, c):
         shift, scale = self.adaLN(c)[:, None].chunk(2, dim=2)
         x = modulate_fused(self.norm(x), shift, scale)
-        return self.pool(x.mean(dim=1)).squeeze(-1)
+        result = self.linear(x.mean(dim=1).squeeze())
+        return result
 
 
 class SemiAutoregressiveFlow(nn.Module):
@@ -270,19 +267,19 @@ class SemiAutoregressiveFlow(nn.Module):
         )
 
 
-    def forward(self, indices, sigma):
+    def forward(self, indices, t):
 
         x = self.vocab_embed(indices)
-        c = F.silu(self.sigma_map(sigma))
+        c = F.silu(self.sigma_map(t))
 
         rotary_cos_sin = self.rotary_emb(x)
 
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             for i in range(len(self.blocks)):
                 x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
 
-            unmask_rate = F.softplus(self.output_layer(x, c))
-            len_rate = F.softplus(self.scalar_head(x, c))
+            unmask_rate = F.softmax(self.output_layer(x, c), dim=-1)
+            len_rate = F.sigmoid(self.scalar_head(x, c))
 
         return unmask_rate, len_rate
     

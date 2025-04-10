@@ -34,7 +34,7 @@ NUM_EPOCHS = 100
 MAX_LENGTH = 64
 MASK_TOKEN = 0
 PAD_TOKEN = 3
-CHECKPOINT_DIR = "checkpoints"
+CHECKPOINT_DIR = "checkpoints/bracket-flow"
 
 class BracketFlowModule(pl.LightningModule):
     def __init__(self, config, learning_rate=LEARNING_RATE):
@@ -77,14 +77,16 @@ class BracketFlowModule(pl.LightningModule):
         pred_unmask_rate, pred_len_rate = self(xt, t)
         
         # Compute losses
-        unmask_loss = mse(pred_unmask_rate, true_rate.unmask_rate)
-        len_loss = mse(pred_len_rate, true_rate.length_rate)
+        unmask_loss = mse(pred_unmask_rate, true_rate.unmask_rate * (1 - t).reshape(-1, 1, 1)).mean()
+        len_loss = mse(pred_len_rate, true_rate.length_rate * (1-t) / MAX_LENGTH).mean()
         loss = unmask_loss + len_loss
         
         # Log losses
         self.log('train/unmask_loss', unmask_loss, prog_bar=True)
         self.log('train/len_loss', len_loss, prog_bar=True)
         self.log('train/total_loss', loss, prog_bar=True)
+        self.log('train/pred_len_rate', pred_len_rate.mean(), prog_bar=True)
+        self.log('train/true_len_rate', (true_rate.length_rate * (1-t) / MAX_LENGTH ).mean(), prog_bar=True)
         
         return loss
     
@@ -118,7 +120,7 @@ def train(resume_from_checkpoint=None):
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     
     # Initialize dataset and dataloader
-    dataset = BracketDataset(10000, {4: 0.1, 8: 0.2, 32: 0.3, 64: 0.4})
+    dataset = BracketDataset(10000, {4: 0.1, 16: 0.4, 32: 0.4, 64: 0.1})
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
     
     # Initialize model
@@ -137,7 +139,7 @@ def train(resume_from_checkpoint=None):
                 save_top_k=3,
                 filename='bracket-flow-{epoch:02d}-{train/total_loss:.4f}',
                 save_last=True,  # Always save the last checkpoint
-                every_n_epochs=1,  # Save every epoch
+                every_n_epochs=5,  # Save every epoch
             )
         ],
         log_every_n_steps=100,
