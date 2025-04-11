@@ -22,9 +22,9 @@ def semiauto_euler_sampling(model: torch.nn.Module, steps: int, mask: int, pad: 
     sampling_trace = []
 
     dt = 1.0 / steps
-    t = torch.ones((batch_size,), device=device)
+    t = torch.zeros((batch_size,), device=device)
     for i in range(steps):
-        t = t - dt
+        t = t + dt
         unmask_rate, len_rate = model(xt, t)
         unmask_rate = unmask_rate / (1 - t).reshape(-1, 1, 1)
         len_rate = len_rate / (1 - t) * max_length
