@@ -8,6 +8,8 @@ from einops import rearrange
 from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
 from omegaconf import OmegaConf
 
+from interpolant import SemiAutoregressiveRate
+
 from . import rotary
 from .fused_add_dropout_scale import (
     bias_dropout_add_scale_fused_train, 
@@ -281,5 +283,8 @@ class SemiAutoregressiveFlow(nn.Module):
             unmask_rate = F.softmax(self.output_layer(x, c), dim=-1)
             len_rate = F.sigmoid(self.scalar_head(x, c))
 
-        return unmask_rate, len_rate
+        return SemiAutoregressiveRate(
+            unmask_rate=unmask_rate,
+            length_rate=len_rate
+        )
     

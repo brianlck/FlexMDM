@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from model.transformer import SemiAutoregressiveFlow
-from interpolant import SemiAutoregressiveInterpolant
+from interpolant import SemiAutoregressiveInterpolant, SemiAutoregressiveRate
 from parenthesis import BracketDataset
 from bregman import mse
 import os
@@ -71,21 +71,24 @@ class BracketFlowModule(pl.LightningModule):
         xt, st = self.interpolant.sample_interpolant(t, x1)
         
         # Get true conditional rate
-        true_rate = self.interpolant.conditional_rate(xt, st, t, x1)
+        true_rate = self.interpolant.conditional_rate(xt, st, t, x1, transformed=True)
         
         # Get model predictions
-        pred_unmask_rate, pred_len_rate = self(xt, t)
+        pred_rate: SemiAutoregressiveRate = self(xt, t)
         
-        # Compute losses
-        unmask_loss = mse(pred_unmask_rate, true_rate.unmask_rate * (1 - t).reshape(-1, 1, 1)).mean()
-        len_loss = mse(pred_len_rate, true_rate.length_rate * (1-t) / MAX_LENGTH).mean()
+        # Compute losses 
+        unmask_loss = mse(pred_rate.unmask_rate, true_rate.unmask_rate)
+        unmask_loss = unmask_loss.mean()
+        len_loss = mse(pred_rate.length_rate, true_rate.length_rate * (1-t) / MAX_LENGTH) / (1 - t)
+        len_loss = len_loss.mean()
         loss = unmask_loss + len_loss
+        loss = loss.mean()
         
         # Log losses
         self.log('train/unmask_loss', unmask_loss, prog_bar=True)
         self.log('train/len_loss', len_loss, prog_bar=True)
         self.log('train/total_loss', loss, prog_bar=True)
-        self.log('train/pred_len_rate', pred_len_rate.mean(), prog_bar=True)
+        self.log('train/pred_len_rate', pred_rate.length_rate.mean(), prog_bar=True)
         self.log('train/true_len_rate', (true_rate.length_rate * (1-t) / MAX_LENGTH ).mean(), prog_bar=True)
         
         return loss

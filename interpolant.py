@@ -25,13 +25,17 @@ class Interpolant(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def conditional_rate(self, xt: Tensor, st: Tensor, t: Tensor, x1: Tensor) -> Any:
+    def conditional_rate(self, xt: Tensor, st: Tensor, t: Tensor, x1: Tensor, transformed: bool = False) -> Any:
         """
         Return aggregate conditional rate \sum_s' R((xt, st), (x', s')) for all x'
         Shape:
             x0, x1: [B, N]
         """
         raise NotImplementedError
+
+    @abc.abstractmethod
+    def to_actual_rate(self, rate, t):
+        return rate
 
 
 class SemiAutoregressiveInterpolant(abc.ABC):
@@ -68,10 +72,14 @@ class SemiAutoregressiveInterpolant(abc.ABC):
 
         return (xt, st)
 
-    def conditional_rate(self, xt, st, t, x1) -> SemiAutoregressiveRate:
+    def conditional_rate(self, xt, st, t, x1, transformed=False) -> SemiAutoregressiveRate:
         B, L = x1.shape
         unmask_rate = torch.zeros((B, L, self.vocab_size), device=x1.device)
-        rate = 1 / (1.0 - t)
+        if transformed:
+            rate = torch.ones_like(t)
+        else:
+            rate = 1. / (1. - t)
+        
         unmask_rate.scatter_(
             2,
             # Filter pad_tokens
@@ -80,6 +88,16 @@ class SemiAutoregressiveInterpolant(abc.ABC):
         )
         x1_len = (x1 != self.pad_token).sum(dim=1)
         xt_len = (xt != self.pad_token).sum(dim=1)
-        len_rates = (x1_len - xt_len) / (1 - t)
+
+        if transformed:
+            len_rates = (x1_len - xt_len) / self.max_length
+        else:
+            len_rates = (x1_len - xt_len) / (1 - t)
 
         return SemiAutoregressiveRate(unmask_rate=unmask_rate, length_rate=len_rates)
+
+    def to_actual_rate(self, rate: SemiAutoregressiveRate, t: Tensor) -> SemiAutoregressiveRate:
+        return SemiAutoregressiveRate(
+            unmask_rate=rate.unmask_rate / (1. - t),
+            length_rate=rate.length_rate / (1. - t) * self.max_length
+        )

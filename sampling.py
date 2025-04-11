@@ -1,7 +1,9 @@
 
 # TOOD: This is a very inflexible sampling algorithm -- Only works for semiautoregressive with one token addition at one time
 # TODO: This code is quite bad, we'd like to refactor, can we use ein / einops?
-import torch    
+import torch
+
+from interpolant import SemiAutoregressiveInterpolant    
 
 # Sample from categorical distribution for each position using the transition probabilities
 def _sample_tokens(probs: torch.Tensor) -> torch.Tensor:
@@ -16,7 +18,7 @@ def _sample_tokens(probs: torch.Tensor) -> torch.Tensor:
     samples = torch.multinomial(flat_probs, num_samples=1)
     return samples.view(batch_size, seq_len) 
 
-def semiauto_euler_sampling(model: torch.nn.Module, steps: int, mask: int, pad: int, batch_size: int, max_length: int):
+def semiauto_euler_sampling(model: torch.nn.Module, interpolant: SemiAutoregressiveInterpolant, steps: int, mask: int, pad: int, batch_size: int, max_length: int):
     device = model.device
     xt = pad * torch.ones((batch_size, max_length), device=device).to(torch.int64)
     sampling_trace = []
@@ -25,9 +27,10 @@ def semiauto_euler_sampling(model: torch.nn.Module, steps: int, mask: int, pad: 
     t = torch.zeros((batch_size,), device=device)
     for i in range(steps):
         t = t + dt
-        unmask_rate, len_rate = model(xt, t)
-        unmask_rate = unmask_rate / (1 - t).reshape(-1, 1, 1)
-        len_rate = len_rate / (1 - t) * max_length
+        pred_rate = model(xt, t)
+        pred_rate = interpolant.to_actual_rate(pred_rate, t)
+        unmask_rate = pred_rate.unmask_rate
+        len_rate = pred_rate.length_rate
         # Probabilistically unmask token
 
         # Fix diagonal entries by setting mask positions to negative sum of other rates

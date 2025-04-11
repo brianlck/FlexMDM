@@ -24,7 +24,6 @@ class BracketDataset(Dataset):
             seq = generate_bracket(L)
             mapped = [1 if c == "(" else 2 for c in seq]
             mapped += [3] * (64 - len(mapped))
-            print(mapped)
             self.data.append(torch.tensor(mapped, dtype=torch.long))
 
     @staticmethod
