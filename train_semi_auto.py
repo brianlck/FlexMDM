@@ -15,9 +15,12 @@ from bregman import mse
 import os
 from pathlib import Path
 
+from schedule import GeometricSchedule, LinearSchedule
+
 # Configuration
 config = OmegaConf.create({
     'tokens': 3,  # 0, 1, 2
+    'max_length': 64,
     'model': {
         'hidden_size': 256,
         'n_heads': 4,
@@ -31,7 +34,6 @@ config = OmegaConf.create({
 BATCH_SIZE = 32
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 100
-MAX_LENGTH = 64
 MASK_TOKEN = 0
 PAD_TOKEN = 3
 CHECKPOINT_DIR = "checkpoints/bracket-flow"
@@ -44,13 +46,17 @@ class BracketFlowModule(pl.LightningModule):
         
         # Initialize model
         self.model = SemiAutoregressiveFlow(config)
-        
+
+        # Initialize Masking Schedule
+        mask_schedule = GeometricSchedule(min=5, max=0.01)
+
         # Initialize interpolant
         self.interpolant = SemiAutoregressiveInterpolant(
+            mask_schedule=mask_schedule,
             vocab_size=config.tokens,
             mask_token=MASK_TOKEN,
             pad_token=PAD_TOKEN,
-            max_length=MAX_LENGTH
+            max_length=config.max_length
         )
         
         # Save hyperparameters
@@ -77,9 +83,9 @@ class BracketFlowModule(pl.LightningModule):
         pred_rate: SemiAutoregressiveRate = self(xt, t)
         
         # Compute losses 
-        unmask_loss = mse(pred_rate.unmask_rate, true_rate.unmask_rate)
+        unmask_loss = mse(pred_rate.unmask_rate, true_rate.unmask_rate) / self.config.max_length
         unmask_loss = unmask_loss.mean()
-        len_loss = mse(pred_rate.length_rate, true_rate.length_rate * (1-t) / MAX_LENGTH) / (1 - t)
+        len_loss = mse(pred_rate.length_rate, true_rate.length_rate)
         len_loss = len_loss.mean()
         loss = unmask_loss + len_loss
         loss = loss.mean()
@@ -88,8 +94,6 @@ class BracketFlowModule(pl.LightningModule):
         self.log('train/unmask_loss', unmask_loss, prog_bar=True)
         self.log('train/len_loss', len_loss, prog_bar=True)
         self.log('train/total_loss', loss, prog_bar=True)
-        self.log('train/pred_len_rate', pred_rate.length_rate.mean(), prog_bar=True)
-        self.log('train/true_len_rate', (true_rate.length_rate * (1-t) / MAX_LENGTH ).mean(), prog_bar=True)
         
         return loss
     
@@ -112,6 +116,7 @@ class BracketFlowModule(pl.LightningModule):
         self.config = checkpoint['config']
         interpolant_state = checkpoint['interpolant_state']
         self.interpolant = SemiAutoregressiveInterpolant(
+            mask_schedule=GeometricSchedule(min=5., max=0.01),
             vocab_size=interpolant_state['vocab_size'],
             mask_token=interpolant_state['mask_token'],
             pad_token=interpolant_state['pad_token'],

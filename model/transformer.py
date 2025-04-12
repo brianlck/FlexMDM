@@ -220,10 +220,10 @@ class DDitFinalLayer(nn.Module):
         return x
 
 
-class ScalarHead(nn.Module):
-    def __init__(self, hidden_size, cond_dim):
+class CombinedHead(nn.Module):
+    def __init__(self, hidden_size, out_channels, cond_dim):
         super().__init__()
-        self.linear = nn.Linear(hidden_size, 1)
+        self.linear = nn.Linear(hidden_size, out_channels)
         self.norm = LayerNorm(hidden_size)
         self.adaLN = nn.Linear(cond_dim, 2 * hidden_size, bias=True)
         self.adaLN.weight.data.zero_()
@@ -232,7 +232,7 @@ class ScalarHead(nn.Module):
     def forward(self, x, c):
         shift, scale = self.adaLN(c)[:, None].chunk(2, dim=2)
         x = modulate_fused(self.norm(x), shift, scale)
-        result = self.linear(x.mean(dim=1).squeeze())
+        result = self.linear(x.mean(dim=1).squeeze()).squeeze()
         return result
 
 
@@ -258,7 +258,7 @@ class SemiAutoregressiveFlow(nn.Module):
 
         self.output_layer = DDitFinalLayer(config.model.hidden_size, vocab_size, config.model.cond_dim)
         # Default to per-sequence scalar prediction
-        self.scalar_head = ScalarHead(config.model.hidden_size, config.model.cond_dim)
+        self.len_pred = CombinedHead(config.model.hidden_size, config.max_length+1, config.model.cond_dim)
 
     
     def _get_bias_dropout_scale(self):
@@ -281,7 +281,7 @@ class SemiAutoregressiveFlow(nn.Module):
                 x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
 
             unmask_rate = F.softmax(self.output_layer(x, c), dim=-1)
-            len_rate = F.sigmoid(self.scalar_head(x, c))
+            len_rate = F.softmax(self.len_pred(x, c), dim=-1)
 
         return SemiAutoregressiveRate(
             unmask_rate=unmask_rate,

@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor    
 
-class Schedule(abc.abstractmethod):
+class Schedule(abc.ABC):
     """
     Generic schedule class for masking or noising
     This represents function a : [0, 1] -> [0, 1] satisfying a(0) = 0, a(1) = 1 or at least approximately
@@ -24,7 +24,6 @@ class Schedule(abc.abstractmethod):
         """
         raise NotImplementedError
 
-    @abc.abstractmethod
     def rate_scale_factor(self, t: Tensor):
         """
             Return d/dt a(t) / (1 - a(t)) common in rate matrix calculation
@@ -43,13 +42,14 @@ class LinearSchedule(Schedule):
     def derivative_at(self, t: Tensor):
         return torch.ones_like(t, device=t.device)
 
-class GeometricSchedule(nn.Module, Schedule):
+class GeometricSchedule(Schedule, nn.Module):
     def __init__(self, min: float, max: float):
-        self.min = torch.Tensor([min])
-        self.max = torch.Tensor([max])
+        super().__init__()
+        self.min = nn.Parameter(Tensor([min]).cuda(), requires_grad=False)
+        self.max = nn.Parameter(Tensor([max]).cuda(), requires_grad=False)
     
     def at(self, t: Tensor):
         return torch.exp(-self.min ** (1 - t) * self.max ** t)
 
     def derivative_at(self, t):
-        return self.at(t) * self.min ** (1-t) * self.max ** t * (self.max.log() - self.min.log())
+        return self.at(t) * self.min ** (1-t) * self.max ** t * (self.min.log() - self.max.log())

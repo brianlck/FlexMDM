@@ -28,7 +28,7 @@ def semiauto_euler_sampling(model: torch.nn.Module, interpolant: SemiAutoregress
     for i in range(steps):
         t = t + dt
         pred_rate = model(xt, t)
-        pred_rate = interpolant.to_actual_rate(pred_rate, t)
+        pred_rate = interpolant.to_actual_rate(xt, pred_rate, t)
         unmask_rate = pred_rate.unmask_rate
         len_rate = pred_rate.length_rate
         # Probabilistically unmask token
