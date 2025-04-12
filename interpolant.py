@@ -101,10 +101,11 @@ class SemiAutoregressiveInterpolant(abc.ABC):
         return SemiAutoregressiveRate(unmask_rate=unmask_rate, length_rate=len_rates)
 
     def to_actual_rate(self, xt: Tensor, rate: SemiAutoregressiveRate, t: Tensor) -> SemiAutoregressiveRate:
+
         rate_scale_factor = self.mask_schedule.rate_scale_factor(t)
-        expected_len = (torch.arange(0, self.max_length+1, device=xt.device).unsqueeze(0) * rate.length_rate).sum()
+        expected_len = (torch.arange(0, self.max_length+1, device=xt.device).unsqueeze(0) * rate.length_rate).sum(dim=-1)
         xt_len = (xt != self.pad_token).sum(dim=1)
         return SemiAutoregressiveRate(
-            unmask_rate=rate.unmask_rate * rate_scale_factor,
+            unmask_rate=rate.unmask_rate / (1 - t).reshape(-1, 1, 1),
             length_rate=(expected_len - xt_len) * rate_scale_factor
         )
