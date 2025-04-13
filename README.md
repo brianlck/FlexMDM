@@ -26,8 +26,8 @@ uv sync
 
 ### Instructions for using VSCode Jupyter Notebook for testing
 Notebooks are provided to play with the sampling algorithms with trained models.
-To use VSCode Jupyter with GPUs, the easiest way is to login to a compute node and tunnel to VSCode.
-This is very easy to do on VSCode code server,
+To use VSCode Jupyter with GPUs, the easiest way is to login to a compute node and establish a connection tunnel.
+This is very easy to do with the VSCode server module on the FASRC cluster,
 
 ```
 salloc [GPU Things]
