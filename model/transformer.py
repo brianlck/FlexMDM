@@ -8,7 +8,7 @@ from einops import rearrange
 from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
 from omegaconf import OmegaConf
 
-from interpolant import SemiAutoregressiveRate
+from interpolant import ReparametrizedRate
 
 from . import rotary
 from .fused_add_dropout_scale import (
@@ -280,11 +280,11 @@ class SemiAutoregressiveFlow(nn.Module):
             for i in range(len(self.blocks)):
                 x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
 
-            unmask_rate = F.softmax(self.output_layer(x, c), dim=-1)
-            len_rate = F.softmax(self.len_pred(x, c), dim=-1)
+            per_token_posterior = F.softmax(self.output_layer(x, c), dim=-1)
+            length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
 
-        return SemiAutoregressiveRate(
-            unmask_rate=unmask_rate,
-            length_rate=len_rate
+        return ReparametrizedRate(
+            per_token_posterior=per_token_posterior,
+            length_posterior=length_posterior
         )
     

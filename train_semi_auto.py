@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from model.transformer import SemiAutoregressiveFlow
-from interpolant import SemiAutoregressiveInterpolant, SemiAutoregressiveRate
+from interpolant import SemiAutoregressiveInterpolant, ReparametrizedRate
 from parenthesis import BracketDataset
 from bregman import mse
 import os
@@ -62,7 +62,7 @@ class BracketFlowModule(pl.LightningModule):
         # Save hyperparameters
         self.save_hyperparameters()
     
-    def forward(self, x, t):
+    def forward(self, x, t) -> ReparametrizedRate:
         return self.model(x, t)
     
     def training_step(self, batch, batch_idx):
@@ -77,15 +77,15 @@ class BracketFlowModule(pl.LightningModule):
         xt, st = self.interpolant.sample_interpolant(t, x1)
         
         # Get true conditional rate
-        true_rate = self.interpolant.conditional_rate(xt, st, t, x1, transformed=True)
+        true_rate: ReparametrizedRate = self.interpolant.conditional_rate(xt, st, t, x1, transformed=True)
         
         # Get model predictions
-        pred_rate: SemiAutoregressiveRate = self(xt, t)
+        pred_rate: ReparametrizedRate = self(xt, t)
         
         # Compute losses 
-        unmask_loss = mse(pred_rate.unmask_rate, true_rate.unmask_rate) / self.config.max_length
+        unmask_loss = mse(pred_rate.per_token_posterior, true_rate.per_token_posterior) / self.config.max_length
         unmask_loss = unmask_loss.mean()
-        len_loss = mse(pred_rate.length_rate, true_rate.length_rate)
+        len_loss = mse(pred_rate.length_posterior, true_rate.length_posterior)
         len_loss = len_loss.mean()
         loss = unmask_loss + len_loss
         loss = loss.mean()

@@ -30,8 +30,6 @@ class Schedule(abc.ABC):
         """
         return self.derivative_at(t) / (1 - self.at(t))
 
-
-
 class LinearSchedule(Schedule):
     def __init__(self):
         pass

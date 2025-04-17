@@ -44,7 +44,7 @@ def semiauto_euler_sampling(model: torch.nn.Module, interpolant: SemiAutoregress
         # Then set it to negative sum of other rates
         unmask_rate[*mask_positions, mask] = -unmask_rate[*mask_positions, :].sum(dim=1)
 
-        # Approximate probability with Euler step 1 + Q dt
+        # Approximate probability with Euler step 1{x' = x} + Q dt
         trans_prob = unmask_rate * dt
         # Temporary xt variable that replaces pad with mask token to avoid illegal memory access
         _xt = xt.clone()
