@@ -288,3 +288,63 @@ class SemiAutoregressiveFlow(nn.Module):
             length_posterior=length_posterior
         )
     
+
+
+class AnyOrderMaskInsertionFlow(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        # hack to make loading in configs easier
+        if type(config) == dict:
+            config = OmegaConf.create(config)
+
+        self.config = config
+
+        self.configvocab_size = config.tokens
+
+        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, self.vocab_size + 1)
+        self.sigma_map = TimestepEmbedder(config.model.cond_dim)
+        self.rotary_emb = rotary.Rotary(config.model.hidden_size // config.model.n_heads)
+
+        self.blocks = nn.ModuleList([
+            DDiTBlock(config.model.hidden_size, config.model.n_heads, config.model.cond_dim, dropout=config.model.dropout) for _ in range(config.model.n_blocks)
+        ])
+
+        self.output_layer = DDitFinalLayer(config.model.hidden_size, self.vocab_size, config.model.cond_dim)
+        # Default to per-sequence scalar prediction
+        self.len_pred = DDitFinalLayer(config.model.hidden_size, config.max_length+1, config.model.cond_dim)
+        self.finalHead = CombinedHead(config.model.hidden_size, config.max_length+1, config.model.cond_dim)
+
+    
+    def _get_bias_dropout_scale(self):
+        return (
+            bias_dropout_add_scale_fused_train
+            if self.training
+            else bias_dropout_add_scale_fused_inference
+        )
+
+
+    def forward(self, indices: torch.Tensor, t: torch.Tensor):
+        B, L = indices.shape
+        indicies = indicies.concatenate([indicies, self.vocab_size * torch.ones(B, 1)], dim=-1)
+
+        x = self.vocab_embed(indices)
+        c = F.silu(self.sigma_map(t))
+
+        rotary_cos_sin = self.rotary_emb(x)
+
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            for i in range(len(self.blocks)):
+                x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+
+            per_token_posterior = F.softmax(self.output_layer(x[:, :-1], c), dim=-1)
+            length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
+
+        return ReparametrizedRate(
+            per_token_posterior=per_token_posterior,
+            length_posterior=length_posterior
+        )
+    
+
+# p(st | xt)
+# For i=0...dim(xt). E[insertion at position i| xt]

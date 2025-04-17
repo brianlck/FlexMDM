@@ -74,4 +74,88 @@ def semiauto_euler_sampling(model: torch.nn.Module, interpolant: SemiAutoregress
 
     return xt, sampling_trace
 
+def any_order_mask_insertion_euler_sampling(
+    model: torch.nn.Module,
+    interpolant: SemiAutoregressiveInterpolant,
+    steps: int,
+    mask: int,
+    pad: int,
+    batch_size: int,
+    max_length: int
+):
+    device = model.device
 
+    # 1) Initialize all‑pad sequence and trace
+    xt = torch.full((batch_size, max_length), pad, dtype=torch.int64, device=device)
+    sampling_trace = []
+
+    dt = 1.0 / steps
+    t = torch.zeros(batch_size, device=device)
+
+    # Precompute row indices for scatter
+    batch_idx_L    = torch.arange(batch_size, device=device).view(batch_size, 1).expand(batch_size, max_length)
+    batch_idx_Lp1  = torch.arange(batch_size, device=device).view(batch_size, 1).expand(batch_size, max_length + 1)
+    pos_idx_L      = torch.arange(max_length, device=device).view(1, max_length).expand(batch_size, max_length)
+    gap_idx_Lp1    = torch.arange(max_length + 1, device=device).view(1, max_length + 1).expand(batch_size, max_length + 1)
+
+    for _ in range(steps):
+        t = t + dt
+
+        # ——— predict and convert rates ———
+        pred_rate   = model(xt, t)
+        pred_rate   = interpolant.to_actual_rate(xt, pred_rate, t)
+        unmask_rate = pred_rate.unmask_rate    # (B, L, V)
+        len_rate    = pred_rate.length_rate     # (B, L+1)
+
+        # ——— unmask step (Euler) ———
+        mask_pos = (xt == mask).nonzero(as_tuple=True)
+        unmask_rate[xt != mask] = 0
+        unmask_rate[*mask_pos, mask] = 0
+        unmask_rate[*mask_pos, mask] = -unmask_rate[*mask_pos, :].sum(dim=1)
+        trans_prob = (unmask_rate * dt).clamp(0.0, 1.0)
+
+        # add “stay” probability
+        _xt = xt.clone()
+        _xt[xt == pad] = mask
+        trans_prob.scatter_add_(2,
+                                _xt.unsqueeze(-1),
+                                torch.ones_like(_xt.unsqueeze(-1), dtype=trans_prob.dtype))
+
+        new_xt = _sample_tokens(trans_prob)
+        new_xt[xt == pad] = pad
+        new_xt = torch.where((xt != mask) & (xt != pad), xt, new_xt)
+
+        # ——— gap‑wise insertion, fully vectorized ———
+        # 1) sample which gaps to extend
+        ext       = torch.bernoulli((len_rate * dt).clamp(0.0, 1.0)).bool()  # (B, L+1)
+        # 2) compute exclusive prefix sum of ext: number of inserts before each gap
+        ext_ex    = ext.cumsum(dim=1) - ext                                      # (B, L+1)
+
+        # 3) compute new positions for every original token
+        new_pos_orig = pos_idx_L + ext_ex[:, :max_length]                         # (B, L)
+        valid_orig   = new_pos_orig < max_length
+        # 4) compute new positions for every inserted mask
+        new_pos_ins  = gap_idx_Lp1 + ext_ex                                       # (B, L+1)
+        valid_ins    = ext & (new_pos_ins < max_length)
+
+        # 5) build new tensor by scattering
+        xt_tmp = torch.full_like(xt, pad)
+
+        # scatter all tokens from new_xt into their shifted slots
+        flat_b_o = batch_idx_L[valid_orig]
+        flat_p_o = new_pos_orig[valid_orig]
+        xt_tmp[flat_b_o, flat_p_o] = new_xt[valid_orig]
+
+        # scatter new mask tokens at each gap insertion
+        flat_b_i = batch_idx_Lp1[valid_ins]
+        flat_p_i = new_pos_ins[valid_ins]
+        xt_tmp[flat_b_i, flat_p_i] = mask
+
+        # restore any pre‑existing real tokens (they must stay fixed)
+        real = (xt != mask) & (xt != pad)
+        xt_tmp[real] = xt[real]
+
+        xt = xt_tmp
+        sampling_trace.append(xt)
+
+    return xt, sampling_trace

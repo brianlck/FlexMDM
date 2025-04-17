@@ -250,7 +250,7 @@ class AnyOrderMaskInsertionInterpolant:
     ) -> Rate:
         B, L = xt.shape
         assert L == self.max_length
-        
+
         device = xt.device
 
         # 1) per‑token unmask rates: just undo the (1−t) scaling
