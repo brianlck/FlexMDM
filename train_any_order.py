@@ -77,7 +77,7 @@ class BracketFlowModule(pl.LightningModule):
         xt, st = self.interpolant.sample_interpolant(t, x1)
         
         # Get true conditional rate
-        true_rate: ReparametrizedRate = self.interpolant.conditional_rate(xt, st, t, x1, transformed=True)
+        true_rate = self.interpolant.reparametrised_conditional_rate(xt, st, t, x1)
         
         # Get model predictions
         pred_rate: ReparametrizedRate = self(xt, t)
@@ -115,7 +115,7 @@ class BracketFlowModule(pl.LightningModule):
         """Load additional information from checkpoint"""
         self.config = checkpoint['config']
         interpolant_state = checkpoint['interpolant_state']
-        self.interpolant = AnyOrderMaskInsertionFlow(
+        self.interpolant = AnyOrderMaskInsertionInterpolant(
             mask_schedule=GeometricSchedule(min=5., max=0.01),
             vocab_size=interpolant_state['vocab_size'],
             mask_token=interpolant_state['mask_token'],

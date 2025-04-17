@@ -77,7 +77,7 @@ class BracketFlowModule(pl.LightningModule):
         xt, st = self.interpolant.sample_interpolant(t, x1)
         
         # Get true conditional rate
-        true_rate: ReparametrizedRate = self.interpolant.conditional_rate(xt, st, t, x1, transformed=True)
+        true_rate = self.interpolant.reparametrised_conditional_rate(xt, st, t, x1)
         
         # Get model predictions
         pred_rate: ReparametrizedRate = self(xt, t)

@@ -31,21 +31,28 @@ class Interpolant(abc.ABC):
         """
         raise NotImplementedError
 
+
     @abc.abstractmethod
-    def conditional_rate(self, xt: Tensor, st: Tensor, t: Tensor, x1: Tensor, reparametrized: bool = False) -> Any:
+    def reparametrised_conditional_rate(self, xt: Tensor, st: Tensor, t: Tensor, x1: Tensor) -> ReparametrizedRate:
+        raise NotImplementedError
+
+
+    @abc.abstractmethod
+    def to_actual_rate(self, rate: ReparametrizedRate, t: Tensor) -> Rate:
+        return rate
+
+
+    def conditional_rate(self, xt: Tensor, st: Tensor, t: Tensor, x1: Tensor) -> Rate:
         """
         Return aggregate conditional rate \sum_s' R((xt, st), (x', s')) for all x'
         Shape:
             x0, x1: [B, N]
         """
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def to_actual_rate(self, rate, t):
-        return rate
+        reparametrized_rate = self.reparametrised_conditional_rate(xt, st, t, x1)
+        return self.to_actual_rate(reparametrized_rate)
 
 
-class SemiAutoregressiveInterpolant(abc.ABC):
+class SemiAutoregressiveInterpolant(Interpolant):
     def __init__(self, mask_schedule: Schedule, vocab_size: int, mask_token: int, pad_token: int, max_length: int):
         """
         TODO: Add knobs
@@ -83,34 +90,23 @@ class SemiAutoregressiveInterpolant(abc.ABC):
 
         return (xt, st)
 
-    def conditional_rate(self, xt: Tensor, st: Tensor, t: Tensor, x1: Tensor, reparametrized=False) -> ReparametrizedRate | Rate:
+    def reparametrised_conditional_rate(self, xt: Tensor, st: Tensor, t: Tensor, x1: Tensor) -> ReparametrizedRate:
         B, L = x1.shape
-        unmask_rate = torch.zeros((B, L, self.vocab_size), device=x1.device)
-        if reparametrized:
-            rate = torch.ones_like(t)
-        else:
-            rate = 1 / (1 - t)
+        per_token_posterior = torch.zeros((B, L, self.vocab_size), device=x1.device)
         
-        unmask_rate.scatter_(
+        per_token_posterior.scatter_(
             2,
             # Filter pad_tokens
             rearrange(torch.where(xt != self.pad_token, x1, 0), "b l -> b l 1"),
-            rearrange(torch.where(xt == self.mask_token, rate.unsqueeze(1), 0.0), "b l -> b l 1"),
+            rearrange(torch.where(xt == self.mask_token, torch.ones_like(t).unsqueeze(1), 0.0), "b l -> b l 1"),
         )
         x1_len = (x1 != self.pad_token).sum(dim=1)
-        xt_len = (xt != self.pad_token).sum(dim=1)
 
-        if reparametrized:
-            return ReparametrizedRate(
-                per_token_posterior=unmask_rate,
-                length_posterior=torch.nn.functional.one_hot(x1_len, num_classes=self.max_length + 1)
-            )
-        else:
-            len_rates = (x1_len - xt_len) * self.mask_schedule.rate_scale_factor(t)
-            return Rate(
-                unmask_rate=unmask_rate,
-                length_rate=len_rates
-            )
+        return ReparametrizedRate(
+            per_token_posterior=per_token_posterior,
+            length_posterior=torch.nn.functional.one_hot(x1_len, num_classes=self.max_length + 1)
+        )
+        
 
     def to_actual_rate(self, xt: Tensor, rate: ReparametrizedRate, t: Tensor) -> Rate:
         rate_scale_factor = self.mask_schedule.rate_scale_factor(t)
@@ -122,7 +118,7 @@ class SemiAutoregressiveInterpolant(abc.ABC):
         )
 
 
-class AnyOrderMaskInsertionInterpolant:
+class AnyOrderMaskInsertionInterpolant(Interpolant):
     def __init__(self, mask_schedule: Schedule, vocab_size: int, mask_token: int, pad_token: int, max_length: int):
         """
         TODO: Add knobs
@@ -176,13 +172,13 @@ class AnyOrderMaskInsertionInterpolant:
 
         return xt, st
 
-    def conditional_rate(self,
+    def reparametrised_conditional_rate(self,
                         xt: Tensor,
                         st: Tensor,
                         t: Tensor,
                         x1: Tensor,
                         reparametrized=False
-    ) -> ReparametrizedRate | Rate:
+    ) -> ReparametrizedRate:
         B, L = x1.shape
 
         # --- 1) build the per-token unmask rates via st ---
@@ -211,7 +207,6 @@ class AnyOrderMaskInsertionInterpolant:
 
         # --- 2) compute true vs current lengths & gaps as before ---
         x1_len = (x1 != self.pad_token).sum(dim=1)            # (B,)
-        xt_len = (xt != self.pad_token).sum(dim=1)            # (B,)
 
         # sort+clamp st for gap-diffs
         sorted_st, _   = torch.sort(st, dim=1)
@@ -225,24 +220,17 @@ class AnyOrderMaskInsertionInterpolant:
         padded    = torch.cat([pad_front, sorted_clamped, pad_back], dim=1)  # (B, L+2)
         gap_counts = padded[:,1:] - padded[:,:-1] - 1                         # (B, L+1)
 
-        if reparametrized:
-            # one-hot each gap count → (B, L+1, max_length+1)
-            length_posterior = torch.nn.functional.one_hot(
-                gap_counts,
-                num_classes=self.max_length+1
-            ).float()
-            return ReparametrizedRate(
-                per_token_posterior=unmask_rate,
-                length_posterior=length_posterior
-            )
-        else:
-            # scale to get continuous-time insertion rates per-gap
-            length_rate = gap_counts * rate.unsqueeze(1)                     # (B, L+1)
-            return Rate(
-                unmask_rate=unmask_rate,
-                length_rate=length_rate
-            )
+        # one-hot each gap count → (B, L+1, max_length+1)
+        length_posterior = torch.nn.functional.one_hot(
+            gap_counts,
+            num_classes=self.max_length+1
+        ).float()
 
+        return ReparametrizedRate(
+            per_token_posterior=unmask_rate,
+            length_posterior=length_posterior
+        )
+    
     def to_actual_rate(self,
                     xt: Tensor,
                     rate: ReparametrizedRate,
