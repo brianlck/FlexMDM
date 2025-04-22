@@ -190,8 +190,12 @@ class AnyOrderMaskInsertionInterpolant(Interpolant):
         # clamp any sentinel positions in st → L-1
         st_clamped = st.clamp(max=L-1)         # so we can safely index x1
 
+        # clamp x1 such that pad tokens does not result in out of bound errors
+        x1_clamped = x1.clamp(max=self.vocab_size-1)
+
         # gather the true token IDs that each xt-slot corresponds to
-        orig_ids = torch.gather(x1, dim=1, index=st_clamped)  # (B, L)
+        orig_ids = torch.gather(x1_clamped, dim=1, index=st_clamped)  # (B, L)
+
 
         # compute, for each slot, whether it's a masked token
         mask_positions = (xt == self.mask_token)              # (B, L)
@@ -215,10 +219,12 @@ class AnyOrderMaskInsertionInterpolant(Interpolant):
             sorted_st,
             x1_len.unsqueeze(1)
         )
-        pad_front = x1.new_zeros((B, 1))
+        
+        pad_front = x1.new_zeros((B, 1)) - 1
         pad_back  = x1_len.unsqueeze(1)
         padded    = torch.cat([pad_front, sorted_clamped, pad_back], dim=1)  # (B, L+2)
         gap_counts = padded[:,1:] - padded[:,:-1] - 1                         # (B, L+1)
+        gap_counts = gap_counts.clamp(min=0)
 
         # one-hot each gap count → (B, L+1, max_length+1)
         length_posterior = torch.nn.functional.one_hot(
