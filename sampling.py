@@ -127,16 +127,16 @@ def any_order_mask_insertion_euler_sampling(
 
         # ——— gap‑wise insertion, fully vectorized ———
         # 1) sample which gaps to extend
-        ext       = torch.bernoulli((len_rate * dt).clamp(0.0, 1.0)).bool()  # (B, L+1)
+        ext       = torch.bernoulli((len_rate * dt).clamp(0.0, 1.0))  # (B, L+1)
         # 2) compute exclusive prefix sum of ext: number of inserts before each gap
-        ext_ex    = ext.cumsum(dim=1) - ext                                      # (B, L+1)
+        ext_ex    = ext.int().cumsum(dim=1)                                      # (B, L+1)
 
         # 3) compute new positions for every original token
         new_pos_orig = pos_idx_L + ext_ex[:, :max_length]                         # (B, L)
         valid_orig   = new_pos_orig < max_length
         # 4) compute new positions for every inserted mask
-        new_pos_ins  = gap_idx_Lp1 + ext_ex                                       # (B, L+1)
-        valid_ins    = ext & (new_pos_ins < max_length)
+        new_pos_ins  = gap_idx_Lp1 + ext_ex - ext.int()                          # (B, L+1)
+        valid_ins    = ext.bool() & (new_pos_ins < max_length)
 
         # 5) build new tensor by scattering
         xt_tmp = torch.full_like(xt, pad)
@@ -154,8 +154,8 @@ def any_order_mask_insertion_euler_sampling(
         # restore any pre‑existing real tokens (they must stay fixed)
         real = (xt != mask) & (xt != pad)
         xt_tmp[real] = xt[real]
-
+        
         xt = xt_tmp
-        sampling_trace.append(xt)
+        sampling_trace.append([xt, new_xt, new_pos_ins])
 
     return xt, sampling_trace
