@@ -299,8 +299,9 @@ class AnyOrderMaskInsertionFlow(nn.Module):
             config = OmegaConf.create(config)
 
         self.config = config
-
-        self.configvocab_size = config.tokens
+        self.vocab_size = config.tokens
+        self.pad_token = config.pad_token
+        self.mask_token = config.mask_token
 
         self.vocab_embed = EmbeddingLayer(config.model.hidden_size, self.vocab_size + 1)
         self.sigma_map = TimestepEmbedder(config.model.cond_dim)
@@ -326,8 +327,8 @@ class AnyOrderMaskInsertionFlow(nn.Module):
 
     def forward(self, indices: torch.Tensor, t: torch.Tensor):
         B, L = indices.shape
-        indicies = indicies.concatenate([indicies, self.vocab_size * torch.ones(B, 1)], dim=-1)
-
+        indices = torch.cat([indices, self.pad_token * torch.ones((B, 1), device=indices.device, dtype=torch.int64)], dim=-1)
+        
         x = self.vocab_embed(indices)
         c = F.silu(self.sigma_map(t))
 

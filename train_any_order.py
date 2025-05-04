@@ -20,6 +20,8 @@ from schedule import GeometricSchedule, LinearSchedule
 # Configuration
 config = OmegaConf.create({
     'tokens': 3,  # 0, 1, 2
+    'mask_token': 0,
+    'pad_token': 3,
     'max_length': 64,
     'model': {
         'hidden_size': 256,
@@ -34,8 +36,6 @@ config = OmegaConf.create({
 BATCH_SIZE = 32
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 100
-MASK_TOKEN = 0
-PAD_TOKEN = 3
 CHECKPOINT_DIR = "checkpoints/bracket-flow"
 
 class BracketFlowModule(pl.LightningModule):
@@ -54,8 +54,8 @@ class BracketFlowModule(pl.LightningModule):
         self.interpolant = AnyOrderMaskInsertionInterpolant(
             mask_schedule=mask_schedule,
             vocab_size=config.tokens,
-            mask_token=MASK_TOKEN,
-            pad_token=PAD_TOKEN,
+            mask_token=config.mask_token,
+            pad_token=config.pad_token,
             max_length=config.max_length
         )
         
