@@ -2,9 +2,26 @@
 # TOOD: This is a very inflexible sampling algorithm -- Only works for semiautoregressive with one token addition at one time
 # TODO: This code is quite bad, we'd like to refactor, can we use ein / einops?
 import torch
+from dataclasses import dataclass
+from interpolant import SemiAutoregressiveInterpolant
+from typing import Any, Literal, Optional
 
-from interpolant import SemiAutoregressiveInterpolant    
+@dataclass
+class SamplingTraceDatapoint:
+    t: float
+    event_type: Literal["insertion", "change"] 
+    position: int
+    token: Any 
 
+@dataclass
+class SamplingResult:
+    samples: torch.Tensor
+    # Trace is supposed to be processed sequentially as updates are not commutative
+    trace: Optional[list[SamplingTraceDatapoint]]
+
+    def __iter__(self):
+        yield from [self.samples, self.trace]
+    
 # Sample from categorical distribution for each position using the transition probabilities
 def _sample_tokens(probs: torch.Tensor) -> torch.Tensor:
     """Sample one token per position from probability distribution.
@@ -18,10 +35,19 @@ def _sample_tokens(probs: torch.Tensor) -> torch.Tensor:
     samples = torch.multinomial(flat_probs, num_samples=1)
     return samples.view(batch_size, seq_len) 
 
-def semiauto_euler_sampling(model: torch.nn.Module, interpolant: SemiAutoregressiveInterpolant, steps: int, mask: int, pad: int, batch_size: int, max_length: int):
+def semiauto_euler_sampling(
+    model: torch.nn.Module,
+    interpolant: SemiAutoregressiveInterpolant,
+    steps: int,
+    mask: int,
+    pad: int,
+    batch_size: int,
+    max_length: int,
+    return_trace: bool = False
+) -> SamplingResult:
     device = model.device
     xt = pad * torch.ones((batch_size, max_length), device=device).to(torch.int64)
-    sampling_trace = []
+    sampling_trace = [[] for _ in range(batch_size)] if return_trace else None
 
     dt = 1.0 / steps
     t = torch.zeros((batch_size,), device=device)
@@ -69,10 +95,36 @@ def semiauto_euler_sampling(model: torch.nn.Module, interpolant: SemiAutoregress
         new_xt[extend_id, first_pad_pos[extend_id]] = mask
 
         new_xt = torch.where((xt != mask) & (xt != pad), xt, new_xt)
-        xt = new_xt
-        sampling_trace.append(new_xt)
 
-    return xt, sampling_trace
+        if return_trace:
+            for i in range(batch_size):
+                
+                # Check if the token was changed
+                for j in range(max_length):
+                    if xt[i, j] != pad and xt[i, j] != new_xt[i, j]:
+                        sampling_trace[i].append(SamplingTraceDatapoint(
+                            t=t[i].item(),
+                            event_type="change",
+                            position=j,
+                            token=new_xt[i, j].item()
+                        ))
+
+                # Check if a new token was inserted
+                if extend_mask[i]:
+                    sampling_trace[i].append(SamplingTraceDatapoint(
+                        t=t[i].item(),
+                        event_type="insertion",
+                        position=first_pad_pos[i].item(),
+                        token=new_xt[i, first_pad_pos[i]].item()
+                    ))
+        
+        xt = new_xt
+
+    return SamplingResult(
+        samples=xt,
+        trace=sampling_trace
+    )
+
 
 def any_order_mask_insertion_euler_sampling(
     model: torch.nn.Module,
@@ -81,8 +133,9 @@ def any_order_mask_insertion_euler_sampling(
     mask: int,
     pad: int,
     batch_size: int,
-    max_length: int
-):
+    max_length: int,
+    return_trace: bool = False,
+) -> SamplingResult:
     device = model.device
 
     # 1) Initialize all‑pad sequence and trace
@@ -97,6 +150,7 @@ def any_order_mask_insertion_euler_sampling(
     batch_idx_Lp1  = torch.arange(batch_size, device=device).view(batch_size, 1).expand(batch_size, max_length + 1)
     pos_idx_L      = torch.arange(max_length, device=device).view(1, max_length).expand(batch_size, max_length)
     gap_idx_Lp1    = torch.arange(max_length + 1, device=device).view(1, max_length + 1).expand(batch_size, max_length + 1)
+    sampling_trace = [[] for _ in range(batch_size)] if return_trace else None
 
     for _ in range(steps):
         t = t + dt
@@ -128,15 +182,18 @@ def any_order_mask_insertion_euler_sampling(
         # ——— gap‑wise insertion, fully vectorized ———
         # 1) sample which gaps to extend
         ext       = torch.bernoulli((len_rate * dt).clamp(0.0, 1.0))  # (B, L+1)
+        xt_len    = torch.sum(xt != pad, dim=1)  # (B,)
+        ext       = torch.where(torch.arange(max_length + 1, device=device).view(1, max_length + 1) <= xt_len.view(batch_size, 1), ext, torch.zeros_like(ext))
+
         # 2) compute exclusive prefix sum of ext: number of inserts before each gap
         ext_ex    = ext.int().cumsum(dim=1)                                      # (B, L+1)
 
         # 3) compute new positions for every original token
         new_pos_orig = pos_idx_L + ext_ex[:, :max_length]                         # (B, L)
-        valid_orig   = new_pos_orig < max_length
+        valid_orig   = (new_pos_orig < max_length) & (pos_idx_L < xt_len.view(batch_size, 1))  # (B, L)
         # 4) compute new positions for every inserted mask
         new_pos_ins  = gap_idx_Lp1 + ext_ex - ext.int()                          # (B, L+1)
-        valid_ins    = ext.bool() & (new_pos_ins < max_length)
+        valid_ins    = ext.bool() & (gap_idx_Lp1 <= xt_len.view(batch_size, 1))  # (B, L+1)
 
         # 5) build new tensor by scattering
         xt_tmp = torch.full_like(xt, pad)
@@ -151,11 +208,29 @@ def any_order_mask_insertion_euler_sampling(
         flat_p_i = new_pos_ins[valid_ins]
         xt_tmp[flat_b_i, flat_p_i] = mask
 
-        # restore any pre‑existing real tokens (they must stay fixed)
-        real = (xt != mask) & (xt != pad)
-        xt_tmp[real] = xt[real]
+        if return_trace:
+            # Check if the token was changed
+            for i in range(batch_size):
+                for j in range(max_length):
+                    if xt[i, j] != pad and xt[i, j] != new_xt[i, j]:
+                        sampling_trace[i].append(SamplingTraceDatapoint(
+                            t=t[i].item(),
+                            event_type="change",
+                            position=j,
+                            token=new_xt[i, j].item()
+                        ))
+                
+                # Check if a new token was inserted
+                for j in range(max_length):
+                    id = max_length - j - 1
+                    if ext[i, id]:
+                        sampling_trace[i].append(SamplingTraceDatapoint(
+                            t=t[i].item(),
+                            event_type="insertion",
+                            position=id,
+                            token=mask
+                        ))
         
         xt = xt_tmp
-        sampling_trace.append([xt, new_xt, new_pos_ins])
 
     return xt, sampling_trace
