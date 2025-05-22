@@ -1,5 +1,4 @@
 import torch
-from torch import nn
 
 
 class Rotary(torch.nn.Module):
@@ -19,20 +18,18 @@ class Rotary(torch.nn.Module):
             freqs = torch.einsum("i,j->ij", t, self.inv_freq.clone())
             emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
             # dims are: batch, seq_len, qkv, head, dim
-            self.cos_cached = emb.cos()[None, :, None, None, :].repeat(1,1,3,1,1)
-            self.sin_cached = emb.sin()[None, :, None, None, :].repeat(1,1,3,1,1)
+            self.cos_cached = emb.cos()[None, :, None, None, :].repeat(1, 1, 3, 1, 1)
+            self.sin_cached = emb.sin()[None, :, None, None, :].repeat(1, 1, 3, 1, 1)
             # This makes the transformation on v an identity.
-            self.cos_cached[:,:,2,:,:].fill_(1.)
-            self.sin_cached[:,:,2,:,:].fill_(0.)
+            self.cos_cached[:, :, 2, :, :].fill_(1.0)
+            self.sin_cached[:, :, 2, :, :].fill_(0.0)
 
         return self.cos_cached, self.sin_cached
 
 
 def rotate_half(x):
     x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
-    return torch.cat(
-        (-x2, x1), dim=-1
-    )
+    return torch.cat((-x2, x1), dim=-1)
 
 
 @torch.jit.script
@@ -43,10 +40,9 @@ def _apply_rotary_pos_emb_torchscript(qkv, cos, sin):
 def apply_rotary_pos_emb(qkv, cos, sin):
     try:
         import flash_attn.layers.rotary
-        cos = cos[0,:,0,0,:cos.shape[-1]//2]
-        sin = sin[0,:,0,0,:sin.shape[-1]//2]
-        return flash_attn.layers.rotary.apply_rotary_emb_qkv_(
-            qkv, cos, sin
-        )
-    except:
+
+        cos = cos[0, :, 0, 0, : cos.shape[-1] // 2]
+        sin = sin[0, :, 0, 0, : sin.shape[-1] // 2]
+        return flash_attn.layers.rotary.apply_rotary_emb_qkv_(qkv, cos, sin)
+    except ImportError:
         return _apply_rotary_pos_emb_torchscript(qkv, cos, sin)

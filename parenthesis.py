@@ -3,13 +3,14 @@ import numpy as np
 import torch
 
 
-def generate_bracket(length: int, seq: str =  ""):
+def generate_bracket(length: int, seq: str = ""):
     import random
+
     if length == 0:
         return seq
     p = random.randint(0, 1)
     if p == 0 or seq == "":
-        return generate_bracket(length-2, "(" + seq + ")")
+        return generate_bracket(length - 2, "(" + seq + ")")
     else:
         return seq + generate_bracket(length, "")
 
@@ -30,19 +31,20 @@ class BracketDataset(Dataset):
     def parse_tensor(tensor: torch.Tensor):
         if tensor.dim() == 1:
             result = ""
-            mapping = { 0:"m", 1:"(", 2:")", 3: "" }
+            mapping = {0: "m", 1: "(", 2: ")", 3: ""}
             for i in range(tensor.size(0)):
                 result += mapping[int(tensor[i].item())]
             return result
         elif tensor.dim() == 2:
-            return [BracketDataset.parse_tensor(tensor[i]) for i in range(tensor.size(0))]
+            return [
+                BracketDataset.parse_tensor(tensor[i]) for i in range(tensor.size(0))
+            ]
         else:
             raise ValueError("input cannot have dimension more than 2")
-                
 
     def __len__(self):
         return len(self.data)
-    
+
     def __getitem__(self, idx):
         return self.data[idx]
 
