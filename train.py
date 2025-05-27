@@ -12,12 +12,14 @@ from interpolant import (
     AnyOrderMaskInsertionInterpolant,
     ReparametrizedRate,
 )
+from data.text import TEXT_DATASETS, setup_tokeniser, get_text_dataset
 from data.parenthesis import BracketDataset
 from bregman import mse
 from schedule import GeometricSchedule
+from datetime import datetime
 
 
-class BracketFlowModule(pl.LightningModule):
+class TransdimensionalFlowModule(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -27,10 +29,10 @@ class BracketFlowModule(pl.LightningModule):
         # Initialize model based on type
         match config.interpolant.type:
             case "semi-auto":
-                self.model = SemiAutoregressiveFlow(config.model)
+                self.model = SemiAutoregressiveFlow(config)
                 interpolant_class = SemiAutoregressiveInterpolant
             case "any-order":
-                self.model = AnyOrderMaskInsertionFlow(config.model)
+                self.model = AnyOrderMaskInsertionFlow(config)
                 interpolant_class = AnyOrderMaskInsertionInterpolant
 
         # Initialize Masking Schedule
@@ -55,35 +57,60 @@ class BracketFlowModule(pl.LightningModule):
         return self.model(x, t)
 
     def training_step(self, batch, batch_idx):
+        # Extract input data
+        if isinstance(batch, dict):
+            batch = batch["input_ids"]
+
         x1 = batch
         batch_size = x1.shape[0]
 
-        # Sample random time steps
+        # Sample Coupled Interpolant (xt, st)
         t = torch.rand(batch_size, device=x1.device)
-
-        # Sample interpolant
         xt, st = self.interpolant.sample_interpolant(t, x1)
 
-        # Get true conditional rate
+        # Sample Reparametrised Rate Matrix
         true_rate = self.interpolant.reparametrised_conditional_rate(xt, st, t, x1)
-
-        # Get model predictions
         pred_rate: ReparametrizedRate = self(xt, t)
 
-        # Compute losses
+        # Compute Unmasking Loss
         unmask_loss = (
             mse(pred_rate.per_token_posterior, true_rate.per_token_posterior)
             / self.config.interpolant.max_length
-        )
-        unmask_loss = unmask_loss.mean()
-        len_loss = mse(pred_rate.length_posterior, true_rate.length_posterior)
-        len_loss = len_loss.mean()
+        ).mean()
+        # Compute Length Loss
+        len_loss = mse(pred_rate.length_posterior, true_rate.length_posterior).mean()
+
         loss = unmask_loss + len_loss
 
-        # Log losses
         self.log("train/unmask_loss", unmask_loss, prog_bar=True)
         self.log("train/len_loss", len_loss, prog_bar=True)
         self.log("train/total_loss", loss, prog_bar=True)
+
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        if isinstance(batch, dict):
+            batch = batch["input_ids"]
+
+        x1 = batch
+        print(x1.shape)
+        batch_size = x1.shape[0]
+
+        t = torch.rand(batch_size, device=x1.device)
+        xt, st = self.interpolant.sample_interpolant(t, x1)
+        true_rate = self.interpolant.reparametrised_conditional_rate(xt, st, t, x1)
+        pred_rate: ReparametrizedRate = self(xt, t)
+
+        unmask_loss = (
+            mse(pred_rate.per_token_posterior, true_rate.per_token_posterior)
+            / self.config.interpolant.max_length
+        ).mean()
+        len_loss = mse(pred_rate.length_posterior, true_rate.length_posterior).mean()
+        loss = unmask_loss + len_loss
+
+        self.log("val/unmask_loss", unmask_loss, prog_bar=True)
+        self.log("val/len_loss", len_loss, prog_bar=True)
+        self.log("val_loss", loss, prog_bar=True)
 
         return loss
 
@@ -122,31 +149,57 @@ def train(config_path, resume_from_checkpoint=None):
     # Load config
     config = OmegaConf.load(config_path)
 
+    time_string = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    config.training.checkpoint_dir = os.path.join(
+        config.training.checkpoint_dir, time_string
+    )
+
     # Create checkpoint directory
     os.makedirs(config.training.checkpoint_dir, exist_ok=True)
 
     # Initialize dataset and dataloader
-    dataset = BracketDataset(10000, {4: 0.1, 16: 0.4, 32: 0.4, 64: 0.1})
-    dataloader = DataLoader(
-        dataset, batch_size=config.training.batch_size, shuffle=True
-    )
+
+    if config.dataset in TEXT_DATASETS:
+        tokeniser = setup_tokeniser()
+        train_set = get_text_dataset(config.dataset, split="train")
+        val_set = get_text_dataset(config.dataset, split="validation")
+        train_loader = DataLoader(
+            train_set, batch_size=config.training.batch_size, shuffle=True
+        )
+        val_loader = DataLoader(
+            val_set, batch_size=config.training.batch_size, shuffle=False
+        )
+        config.interpolant.tokens = len(tokeniser)
+        config.interpolant.pad_token = tokeniser.pad_token_id
+        config.interpolant.mask_token = tokeniser.mask_token_id
+    if config.dataset in ["bracket"]:
+        train_loader = DataLoader(
+            BracketDataset(10000, {4: 0.1, 16: 0.4, 32: 0.4, 64: 0.1}),
+            batch_size=config.training.batch_size,
+            shuffle=True,
+        )
+        val_loader = DataLoader(
+            BracketDataset(300, {4: 0.1, 16: 0.4, 32: 0.4, 64: 0.1}),
+            batch_size=config.training.batch_size,
+            shuffle=False,
+        )
 
     # Initialize model
-    model = BracketFlowModule(config)
+    model = TransdimensionalFlowModule(config)
 
     # Initialize trainer
     trainer = pl.Trainer(
         max_epochs=config.training.num_epochs,
         accelerator="gpu",
-        devices=1,
+        devices=config.training.devices,
         callbacks=[
             ModelCheckpoint(
                 dirpath=config.training.checkpoint_dir,
-                monitor="train/total_loss",
+                monitor="val_loss",
                 mode="min",
                 save_top_k=3,
-                filename=f"bracket-{config.interpolant.type}"
-                + "-{epoch:02d}-{train / total_loss:.4f}",
+                filename="{epoch:02d}-{val_loss:.4f}",
                 save_last=True,
                 every_n_epochs=5,
             )
@@ -156,7 +209,12 @@ def train(config_path, resume_from_checkpoint=None):
     )
 
     # Train the model
-    trainer.fit(model, dataloader, ckpt_path=resume_from_checkpoint)
+    trainer.fit(
+        model,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,
+        ckpt_path=resume_from_checkpoint,
+    )
 
 
 if __name__ == "__main__":

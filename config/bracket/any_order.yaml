@@ -1,3 +1,4 @@
+dataset: "bracket"
 model:
   hidden_size: 256
   n_heads: 4
@@ -5,9 +6,9 @@ model:
   dropout: 0.1
   n_blocks: 4
 interpolant:
-  type: "semi-auto"
+  type: "any-order"
   max_length: 64
-  tokens: 3
+  tokens: 4
   mask_token: 0
   pad_token: 3
   mask_schedule:
@@ -16,5 +17,6 @@ interpolant:
 training:
   batch_size: 32
   learning_rate: 0.0001
+  devices: 1
   num_epochs: 100
-  checkpoint_dir: "checkpoints/semi-auto"
+  checkpoint_dir: "checkpoints/bracket/semi-auto"

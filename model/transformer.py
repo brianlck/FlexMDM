@@ -31,7 +31,7 @@ class LayerNorm(nn.Module):
         self.dim = dim
 
     def forward(self, x):
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             x = F.layer_norm(x.float(), [self.dim])
         return x * self.weight[None, None, :]
 
@@ -165,7 +165,7 @@ class DDiTBlock(nn.Module):
         qkv = rearrange(
             qkv, "b s (three h d) -> b s three h d", three=3, h=self.n_heads
         )
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             cos, sin = rotary_cos_sin
             qkv = rotary.apply_rotary_pos_emb(qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
         qkv = rearrange(qkv, "b s ... -> (b s) ...")
@@ -254,10 +254,9 @@ class SemiAutoregressiveFlow(nn.Module):
             config = OmegaConf.create(config)
 
         self.config = config
+        vocab_size = config.interpolant.tokens
 
-        vocab_size = config.tokens
-
-        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, vocab_size + 1)
+        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, vocab_size)
         self.sigma_map = TimestepEmbedder(config.model.cond_dim)
         self.rotary_emb = rotary.Rotary(
             config.model.hidden_size // config.model.n_heads
@@ -280,7 +279,9 @@ class SemiAutoregressiveFlow(nn.Module):
         )
         # Default to per-sequence scalar prediction
         self.len_pred = CombinedHead(
-            config.model.hidden_size, config.max_length + 1, config.model.cond_dim
+            config.model.hidden_size,
+            config.interpolant.max_length + 1,
+            config.model.cond_dim,
         )
 
     def _get_bias_dropout_scale(self):
@@ -317,11 +318,11 @@ class AnyOrderMaskInsertionFlow(nn.Module):
             config = OmegaConf.create(config)
 
         self.config = config
-        self.vocab_size = config.tokens
-        self.pad_token = config.pad_token
-        self.mask_token = config.mask_token
+        self.vocab_size = config.interpolant.tokens
+        self.pad_token = config.interpolant.pad_token
+        self.mask_token = config.interpolant.mask_token
 
-        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, self.vocab_size + 1)
+        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, self.vocab_size)
         self.sigma_map = TimestepEmbedder(config.model.cond_dim)
         self.rotary_emb = rotary.Rotary(
             config.model.hidden_size // config.model.n_heads
@@ -344,10 +345,14 @@ class AnyOrderMaskInsertionFlow(nn.Module):
         )
         # Default to per-sequence scalar prediction
         self.len_pred = DDitFinalLayer(
-            config.model.hidden_size, config.max_length + 1, config.model.cond_dim
+            config.model.hidden_size,
+            config.interpolant.max_length + 1,
+            config.model.cond_dim,
         )
         self.finalHead = CombinedHead(
-            config.model.hidden_size, config.max_length + 1, config.model.cond_dim
+            config.model.hidden_size,
+            config.interpolant.max_length + 1,
+            config.model.cond_dim,
         )
 
     def _get_bias_dropout_scale(self):

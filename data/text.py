@@ -3,6 +3,8 @@ from transformers import GPT2TokenizerFast
 from datasets import Dataset, load_dataset
 from typing import Literal
 
+TEXT_DATASETS = ["wikitext2"]
+
 
 def wt_detokeniser(string):
     # contractions
@@ -37,13 +39,25 @@ def wt_detokeniser(string):
     return string
 
 
-def get_dataset(
+def setup_tokeniser() -> GPT2TokenizerFast:
+    tokeniser = GPT2TokenizerFast.from_pretrained("gpt2")
+    tokeniser.add_special_tokens(
+        {
+            "pad_token": "[PAD]",
+            "mask_token": "[MASK]",
+        }
+    )
+
+    return tokeniser
+
+
+def get_text_dataset(
     name: str,
     split: Literal["train", "validation", "test"],
     cache_dir=None,
     max_length=1024,
     num_proc=8,
-) -> tuple[GPT2TokenizerFast, Dataset]:
+) -> Dataset:
     match name:
         case "wikitext2":
             dataset = load_dataset(
@@ -53,8 +67,7 @@ def get_dataset(
             raise ValueError(f"Dataset {name} not supported")
 
     detokeniser = wt_detokeniser
-    tokeniser: GPT2TokenizerFast = GPT2TokenizerFast.from_pretrained("gpt2")
-    tokeniser.add_special_tokens({"pad_token": "[PAD]"})
+    tokeniser = setup_tokeniser()
     pad_token = tokeniser.pad_token_id
 
     def preprocess(sample):
@@ -71,8 +84,10 @@ def get_dataset(
         remove_columns=["text"],
     )
     tokenised_dataset = tokenised_dataset.filter(
-        lambda x: len(x["input_ids"]) <= max_length
+        lambda x: len(x["input_ids"]) <= max_length,
+        num_proc=num_proc,
+        load_from_cache_file=True,
     )
     tokenised_dataset = tokenised_dataset.with_format("torch")
 
-    return tokeniser, tokenised_dataset
+    return tokenised_dataset

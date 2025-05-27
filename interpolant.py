@@ -65,8 +65,6 @@ class SemiAutoregressiveInterpolant(Interpolant):
         TODO: Add knobs
         """
         super().__init__()
-        assert 0 <= mask_token < vocab_size
-        assert pad_token >= vocab_size
         self.mask_token = mask_token
         self.pad_token = pad_token
         self.max_length = max_length
@@ -147,8 +145,6 @@ class AnyOrderMaskInsertionInterpolant(Interpolant):
         TODO: Add knobs
         """
         super().__init__()
-        assert 0 <= mask_token < vocab_size
-        assert pad_token >= vocab_size
         self.mask_token = mask_token
         self.pad_token = pad_token
         self.max_length = max_length
