@@ -12,6 +12,8 @@ class Rate:
     unmask_rate: Tensor  # Shape [Batch, Length, Vocab]
     length_rate: Tensor  # Shape [Batch]
 
+
+@dataclass
 class ReparametrizedRate:
     def __init__(self, per_token_posterior: Tensor, length_posterior: Tensor):
         self.per_token_posterior = per_token_posterior
@@ -114,9 +116,9 @@ class Interpolant(abc.ABC):
         x1_len = (x1 != self.pad_token).sum(dim=1)
         sorted_clamped = torch.minimum(sorted_st, x1_len.unsqueeze(1))
         pad_front = x1.new_zeros((B, 1)) - 1
-        pad_back  = x1_len.unsqueeze(1)
-        padded    = torch.cat([pad_front, sorted_clamped, pad_back], dim=1)  # (B, L+2)
-        gap_counts = padded[:,1:] - padded[:,:-1] - 1                         # (B, L+1)
+        pad_back = x1_len.unsqueeze(1)
+        padded = torch.cat([pad_front, sorted_clamped, pad_back], dim=1)  # (B, L+2)
+        gap_counts = padded[:, 1:] - padded[:, :-1] - 1  # (B, L+1)
         gap_counts = gap_counts.clamp(min=0)
 
         assert xt.shape == st.shape == x1.shape == xt_mask_indices.shape == x1_remained.shape

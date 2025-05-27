@@ -34,3 +34,13 @@ salloc [GPU Things]
 module load vscode
 code tunnel
 ```
+
+### Pre-commit Hook
+The codebase employ a ruff pre-commit hook for style fomartting.
+
+After you've installed the necessary dependencies, install the pre-commit hooks by,
+
+```
+pre-commit install
+```
+

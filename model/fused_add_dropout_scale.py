@@ -11,7 +11,12 @@ torch._C._jit_override_can_fuse_on_gpu(True)
 
 
 def bias_dropout_add_scale(
-    x: Tensor, bias: Optional[Tensor], scale: Tensor, residual: Optional[Tensor], prob: float, training: bool
+    x: Tensor,
+    bias: Optional[Tensor],
+    scale: Tensor,
+    residual: Optional[Tensor],
+    prob: float,
+    training: bool,
 ) -> Tensor:
     if bias is not None:
         out = scale * F.dropout(x + bias, p=prob, training=training)
@@ -36,16 +41,25 @@ def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
 
 @torch.jit.script
 def bias_dropout_add_scale_fused_train(
-    x: Tensor, bias: Optional[Tensor], scale: Tensor, residual: Optional[Tensor], prob: float
+    x: Tensor,
+    bias: Optional[Tensor],
+    scale: Tensor,
+    residual: Optional[Tensor],
+    prob: float,
 ) -> Tensor:
     return bias_dropout_add_scale(x, bias, scale, residual, prob, True)
 
 
 @torch.jit.script
 def bias_dropout_add_scale_fused_inference(
-    x: Tensor, bias: Optional[Tensor], scale: Tensor, residual: Optional[Tensor], prob: float
+    x: Tensor,
+    bias: Optional[Tensor],
+    scale: Tensor,
+    residual: Optional[Tensor],
+    prob: float,
 ) -> Tensor:
     return bias_dropout_add_scale(x, bias, scale, residual, prob, False)
+
 
 @torch.jit.script
 def modulate_fused(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
