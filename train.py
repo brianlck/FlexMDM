@@ -198,10 +198,10 @@ def train(config_path, resume_from_checkpoint=None):
                 dirpath=config.training.checkpoint_dir,
                 monitor="val_loss",
                 mode="min",
-                save_top_k=3,
+                save_top_k=config.training.save_top_k,
                 filename="{epoch:02d}-{val_loss:.4f}",
                 save_last=True,
-                every_n_epochs=5,
+                every_n_epochs=config.training.save_every_n_epochs,
             )
         ],
         log_every_n_steps=100,

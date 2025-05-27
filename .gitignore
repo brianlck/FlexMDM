@@ -16,3 +16,6 @@ checkpoints/
 
 # Lightning logs
 lightning_logs/
+
+# slurm_logs
+slurm_logs
