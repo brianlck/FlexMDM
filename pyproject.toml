@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "black>=25.1.0",
+    "datasets>=3.6.0",
     "einops>=0.8.1",
     "flash-attn>=2.7.4.post1",
     "huggingface>=0.0.1",
@@ -18,6 +19,7 @@ dependencies = [
     "torch>=2.6.0",
     "torchaudio>=2.6.0",
     "torchvision>=0.21.0",
+    "transformers>=4.52.3",
 ]
 
 [dependency-groups]
