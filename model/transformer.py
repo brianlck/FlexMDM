@@ -2,10 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+
 from einops import rearrange
 from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
 from omegaconf import OmegaConf
+
 from interpolant import ReparametrizedRate
+
 from . import rotary
 from .fused_add_dropout_scale import (
     bias_dropout_add_scale_fused_train,
@@ -33,7 +36,6 @@ class LayerNorm(nn.Module):
         return x * self.weight[None, None, :]
 
 
-# TODO: check if we need this
 def residual_linear(x, W, x_skip, residual_scale):
     """x_skip + residual_scale * W @ x"""
     dim_out, dim_in = W.shape[0], W.shape[1]
@@ -109,35 +111,6 @@ class LabelEmbedder(nn.Module):
         return embeddings
 
 
-# length scalar head
-class ScalarLengthHead(nn.Module):
-    def __init__(self, d_model: int, normalized_len: int, cond_dim: int | None = None):
-        super().__init__()
-        self.has_cond = cond_dim is not None
-        if self.has_cond:
-            self.adaLN = nn.Linear(cond_dim, 2 * d_model, bias=True)
-            self.adaLN.weight.data.zero_()
-            self.adaLN.bias.data.zero_()
-
-        self.norm = LayerNorm(d_model)
-        self.proj1 = nn.Linear(d_model, d_model)
-        self.act = nn.GELU()
-        self.proj2 = nn.Linear(d_model, 1)
-        self.softplus = nn.Softplus()
-        self.normalized_len = normalized_len
-
-    def forward(self, x: torch.Tensor, c: torch.Tensor | None = None):
-        x_fp32 = x.float()
-        c_fp32 = c.float() if (self.has_cond and c is not None) else None
-        if self.has_cond and c_fp32 is not None:
-            shift, scale = self.adaLN(c_fp32)[:, None].chunk(2, dim=2)
-            x_fp32 = modulate_fused(self.norm(x_fp32), shift, scale)
-        else:
-            x_fp32 = self.norm(x_fp32)
-        s = self.proj2(self.act(self.proj1(x_fp32)))
-        out = self.softplus(s).squeeze(-1) * self.normalized_len
-        return out.to(x.dtype)
-
 #################################################################################
 #                                 Core Model                                    #
 #################################################################################
@@ -206,7 +179,6 @@ class DDiTBlock(nn.Module):
             )
         else:
             cu_seqlens = seqlens.cumsum(-1)
-        # qkv is bfloat16
         x = flash_attn_varlen_qkvpacked_func(
             qkv, cu_seqlens, seq_len, 0.0, causal=False
         )
@@ -257,7 +229,6 @@ class DDitFinalLayer(nn.Module):
         return x
 
 
-# TODO: check if we need this
 class CombinedHead(nn.Module):
     def __init__(self, hidden_size, out_channels, cond_dim):
         super().__init__()
@@ -272,81 +243,6 @@ class CombinedHead(nn.Module):
         x = modulate_fused(self.norm(x), shift, scale)
         result = self.linear(x.mean(dim=1).squeeze()).squeeze()
         return result
-
-
-class AnyOrderMaskInsertionFlow(nn.Module):
-    def __init__(self, config, *,len_predict_type='distribution'):
-        super().__init__()
-
-        # hack to make loading in configs easier
-        if type(config) == dict:
-            config = OmegaConf.create(config)
-
-        self.config = config
-        self.vocab_size = config.tokens
-        self.pad_token = config.pad_token
-        self.mask_token = config.mask_token
-
-        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, self.vocab_size + 1)
-        self.sigma_map = TimestepEmbedder(config.model.cond_dim)
-        self.rotary_emb = rotary.Rotary(config.model.hidden_size // config.model.n_heads)
-
-        self.blocks = nn.ModuleList([
-            DDiTBlock(config.model.hidden_size, config.model.n_heads, config.model.cond_dim, dropout=config.model.dropout) for _ in range(config.model.n_blocks)
-        ])
-
-        self.output_layer = DDitFinalLayer(config.model.hidden_size, self.vocab_size, config.model.cond_dim)
-        self.len_predict_type = len_predict_type
-
-        if self.len_predict_type == 'distribution':
-            self.len_pred = DDitFinalLayer(config.model.hidden_size, config.max_length+1, config.model.cond_dim)
-        elif self.len_predict_type == 'expectation':
-            normalized_len = config.max_length
-            self.len_pred = ScalarLengthHead(config.model.hidden_size, normalized_len, config.model.cond_dim)
-        else:
-            raise ValueError(f"Invalid length prediction type: {self.len_predict_type}")
-
-        #self.finalHead = CombinedHead(config.model.hidden_size, config.max_length+1, config.model.cond_dim)
-
-    
-    def _get_bias_dropout_scale(self):
-        return (
-            bias_dropout_add_scale_fused_train
-            if self.training
-            else bias_dropout_add_scale_fused_inference
-        )
-
-
-    def forward(self, indices: torch.Tensor, t: torch.Tensor):
-        B, L = indices.shape
-        indices = torch.cat([indices, self.pad_token * torch.ones((B, 1), device=indices.device, dtype=torch.int64)], dim=-1)
-        
-        x = self.vocab_embed(indices)
-        c = F.silu(self.sigma_map(t))
-
-        rotary_cos_sin = self.rotary_emb(x)
-
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            for i in range(len(self.blocks)):
-                x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
-
-            # --- Unmasking prediction ---
-            per_token_posterior = self.output_layer(x[:, :-1], c)
-            # --- Length prediction ---
-            if self.len_predict_type == 'distribution': # p(insertions | xt)
-                length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
-            elif self.len_predict_type == 'expectation': # E[insertions | xt] / normalized by L
-                length_posterior = self.len_pred(x, c)
-        
-        return ReparametrizedRate(
-            per_token_posterior=per_token_posterior,
-            length_posterior=length_posterior
-        )
-    
-
-# p(st | xt)
-# For i=0...dim(xt). E[insertion at position i| xt]
-
 
 
 class SemiAutoregressiveFlow(nn.Module):
@@ -405,12 +301,94 @@ class SemiAutoregressiveFlow(nn.Module):
             for i in range(len(self.blocks)):
                 x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
 
-            # for CE loss, we directly use the output of the model
-            per_token_posterior = self.output_layer(x, c)
-            # per_token_posterior = F.softmax(self.output_layer(x, c), dim=-1)
+            per_token_posterior = F.softmax(self.output_layer(x, c), dim=-1)
             length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
 
         return ReparametrizedRate(
-            per_token_posterior=per_token_posterior,
-            length_posterior=length_posterior
+            per_token_posterior=per_token_posterior, length_posterior=length_posterior
         )
+
+
+class AnyOrderMaskInsertionFlow(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        # hack to make loading in configs easier
+        if isinstance(config, dict):
+            config = OmegaConf.create(config)
+
+        self.config = config
+        self.vocab_size = config.interpolant.tokens
+        self.pad_token = config.interpolant.pad_token
+        self.mask_token = config.interpolant.mask_token
+
+        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, self.vocab_size)
+        self.sigma_map = TimestepEmbedder(config.model.cond_dim)
+        self.rotary_emb = rotary.Rotary(
+            config.model.hidden_size // config.model.n_heads
+        )
+
+        self.blocks = nn.ModuleList(
+            [
+                DDiTBlock(
+                    config.model.hidden_size,
+                    config.model.n_heads,
+                    config.model.cond_dim,
+                    dropout=config.model.dropout,
+                )
+                for _ in range(config.model.n_blocks)
+            ]
+        )
+
+        self.output_layer = DDitFinalLayer(
+            config.model.hidden_size, self.vocab_size, config.model.cond_dim
+        )
+        # Default to per-sequence scalar prediction
+        self.len_pred = DDitFinalLayer(
+            config.model.hidden_size,
+            config.interpolant.max_length + 1,
+            config.model.cond_dim,
+        )
+        self.finalHead = CombinedHead(
+            config.model.hidden_size,
+            config.interpolant.max_length + 1,
+            config.model.cond_dim,
+        )
+
+    def _get_bias_dropout_scale(self):
+        return (
+            bias_dropout_add_scale_fused_train
+            if self.training
+            else bias_dropout_add_scale_fused_inference
+        )
+
+    def forward(self, indices: torch.Tensor, t: torch.Tensor):
+        B, L = indices.shape
+        indices = torch.cat(
+            [
+                indices,
+                self.pad_token
+                * torch.ones((B, 1), device=indices.device, dtype=torch.int64),
+            ],
+            dim=-1,
+        )
+
+        x = self.vocab_embed(indices)
+        c = F.silu(self.sigma_map(t))
+
+        rotary_cos_sin = self.rotary_emb(x)
+
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            for i in range(len(self.blocks)):
+                x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+
+            per_token_posterior = F.softmax(self.output_layer(x[:, :-1], c), dim=-1)
+            length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
+
+        return ReparametrizedRate(
+            per_token_posterior=per_token_posterior, length_posterior=length_posterior
+        )
+
+
+# p(st | xt)
+# For i=0...dim(xt). E[insertion at position i| xt]
