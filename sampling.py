@@ -2,7 +2,7 @@
 # TODO: This code is quite bad, we'd like to refactor, can we use ein / einops?
 import torch
 from dataclasses import dataclass
-from interpolant import SemiAutoregressiveInterpolant
+from interpolant import SemiAutoregressiveInterpolant, AnyOrderMaskInsertionInterpolant
 from typing import Any, Literal, Optional
 
 
@@ -55,6 +55,7 @@ def semiauto_euler_sampling(
     dt = 1.0 / steps
     t = torch.zeros((batch_size,), device=device)
     for i in range(steps):
+        print(f"step {i}")
         t = t + dt
         pred_rate = model(xt, t)
         pred_rate = interpolant.to_actual_rate(xt, pred_rate, t)
@@ -135,7 +136,7 @@ def semiauto_euler_sampling(
 
 def any_order_mask_insertion_euler_sampling(
     model: torch.nn.Module,
-    interpolant: SemiAutoregressiveInterpolant,
+    interpolant: AnyOrderMaskInsertionInterpolant,
     steps: int,
     mask: int,
     pad: int,
@@ -175,13 +176,14 @@ def any_order_mask_insertion_euler_sampling(
     )
     sampling_trace = [[] for _ in range(batch_size)] if return_trace else None
 
-    for _ in range(steps):
+    for i in range(steps):
         t = t + dt
+        print(f"step {i}")
 
         # ——— predict and convert rates ———
         pred_rate = model(xt, t)
         pred_rate = interpolant.to_actual_rate(xt, pred_rate, t)
-        unmask_rate = pred_rate.unmask_rate  # (B, L, V)
+        unmask_rate = pred_rate.unmask_rate.softmax(dim=-1)  # (B, L, V)
         len_rate = pred_rate.length_rate  # (B, L+1)
 
         # ——— unmask step (Euler) ———
@@ -214,6 +216,8 @@ def any_order_mask_insertion_euler_sampling(
             ext,
             torch.zeros_like(ext),
         )
+        has_room = (xt_len < max_length).view(-1, 1)
+        ext = ext * has_room
 
         # 2) compute exclusive prefix sum of ext: number of inserts before each gap
         ext_ex = ext.int().cumsum(dim=1)  # (B, L+1)
