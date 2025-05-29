@@ -36,13 +36,6 @@ class LayerNorm(nn.Module):
         return x * self.weight[None, None, :]
 
 
-def residual_linear(x, W, x_skip, residual_scale):
-    """x_skip + residual_scale * W @ x"""
-    dim_out, dim_in = W.shape[0], W.shape[1]
-    return torch.addmm(
-        x_skip.view(-1, dim_out), x.view(-1, dim_in), W.T, alpha=residual_scale
-    ).view(*x.shape[:-1], dim_out)
-
 
 #################################################################################
 #               Embedding Layers for Timesteps and Class Labels                 #
@@ -110,6 +103,35 @@ class LabelEmbedder(nn.Module):
         embeddings = self.embedding_table(labels)
         return embeddings
 
+
+# length scalar head
+class ScalarLengthHead(nn.Module):
+    def __init__(self, d_model: int, normalized_len: int, cond_dim: int | None = None):
+        super().__init__()
+        self.has_cond = cond_dim is not None
+        if self.has_cond:
+            self.adaLN = nn.Linear(cond_dim, 2 * d_model, bias=True)
+            self.adaLN.weight.data.zero_()
+            self.adaLN.bias.data.zero_()
+
+        self.norm = LayerNorm(d_model)
+        self.proj1 = nn.Linear(d_model, d_model)
+        self.act = nn.GELU()
+        self.proj2 = nn.Linear(d_model, 1)
+        self.softplus = nn.Softplus()
+        self.normalized_len = normalized_len
+
+    def forward(self, x: torch.Tensor, c: torch.Tensor | None = None):
+        x_fp32 = x.float()
+        c_fp32 = c.float() if (self.has_cond and c is not None) else None
+        if self.has_cond and c_fp32 is not None:
+            shift, scale = self.adaLN(c_fp32)[:, None].chunk(2, dim=2)
+            x_fp32 = modulate_fused(self.norm(x_fp32), shift, scale)
+        else:
+            x_fp32 = self.norm(x_fp32)
+        s = self.proj2(self.act(self.proj1(x_fp32)))
+        out = self.softplus(s).squeeze(-1) * self.normalized_len
+        return out.to(x.dtype)
 
 #################################################################################
 #                                 Core Model                                    #
@@ -229,22 +251,6 @@ class DDitFinalLayer(nn.Module):
         return x
 
 
-class CombinedHead(nn.Module):
-    def __init__(self, hidden_size, out_channels, cond_dim):
-        super().__init__()
-        self.linear = nn.Linear(hidden_size, out_channels)
-        self.norm = LayerNorm(hidden_size)
-        self.adaLN = nn.Linear(cond_dim, 2 * hidden_size, bias=True)
-        self.adaLN.weight.data.zero_()
-        self.adaLN.bias.data.zero_()
-
-    def forward(self, x, c):
-        shift, scale = self.adaLN(c)[:, None].chunk(2, dim=2)
-        x = modulate_fused(self.norm(x), shift, scale)
-        result = self.linear(x.mean(dim=1).squeeze()).squeeze()
-        return result
-
-
 class SemiAutoregressiveFlow(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -310,7 +316,7 @@ class SemiAutoregressiveFlow(nn.Module):
 
 
 class AnyOrderMaskInsertionFlow(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, len_predict_type):
         super().__init__()
 
         # hack to make loading in configs easier
@@ -343,17 +349,15 @@ class AnyOrderMaskInsertionFlow(nn.Module):
         self.output_layer = DDitFinalLayer(
             config.model.hidden_size, self.vocab_size, config.model.cond_dim
         )
-        # Default to per-sequence scalar prediction
-        self.len_pred = DDitFinalLayer(
-            config.model.hidden_size,
-            config.interpolant.max_length + 1,
-            config.model.cond_dim,
-        )
-        self.finalHead = CombinedHead(
-            config.model.hidden_size,
-            config.interpolant.max_length + 1,
-            config.model.cond_dim,
-        )
+
+        self.len_predict_type = len_predict_type
+        if self.len_predict_type == 'distribution':
+            self.len_pred = DDitFinalLayer(config.model.hidden_size, config.interpolant.max_length+1, config.model.cond_dim)
+        elif self.len_predict_type == 'expectation':
+            normalized_len = config.interpolant.max_length
+            self.len_pred = ScalarLengthHead(config.model.hidden_size, normalized_len, config.model.cond_dim)
+        else:
+            raise ValueError(f"Invalid length prediction type: {self.len_predict_type}")
 
     def _get_bias_dropout_scale(self):
         return (
@@ -382,8 +386,13 @@ class AnyOrderMaskInsertionFlow(nn.Module):
             for i in range(len(self.blocks)):
                 x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
 
-            per_token_posterior = F.softmax(self.output_layer(x[:, :-1], c), dim=-1)
-            length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
+            # --- unmasking ---
+            per_token_posterior = self.output_layer(x[:, :-1], c)
+            # --- length prediction ---
+            if self.len_predict_type == 'distribution': # p(insertions | xt)
+                length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
+            elif self.len_predict_type == 'expectation': # E[insertions | xt]
+                length_posterior = self.len_pred(x, c)
 
         return ReparametrizedRate(
             per_token_posterior=per_token_posterior, length_posterior=length_posterior

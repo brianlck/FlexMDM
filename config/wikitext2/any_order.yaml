@@ -7,14 +7,14 @@ model:
   n_blocks: 4
 interpolant:
   type: "any-order"
-  max_length: 1024
+  max_length: 256
   mask_schedule:
     min: 5
     max: 0.01
 training:
   batch_size: 32
   learning_rate: 0.0001
-  devices: 4
+  devices: 1
   num_epochs: 5
   checkpoint_dir: "checkpoints/wikitext2"
   save_top_k: 1
