@@ -6,7 +6,6 @@ model:
   dropout: 0.1
   n_blocks: 4
 interpolant:
-  type: "any-order"
   max_length: 512
   mask_schedule:
     min: 5

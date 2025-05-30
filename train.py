@@ -65,6 +65,7 @@ class TransdimensionalFlowModule(pl.LightningModule):
 
     def brian_training_loss(self, x1, t):
         xt, st = self.interpolant.sample_interpolant(t, x1)
+        print(x1.shape, xt.shape)
         true_rate = self.interpolant.reparametrised_conditional_rate(xt, st, t, x1)
 
         # model prediction
@@ -224,8 +225,8 @@ def train(args):
 
     if config.dataset in TEXT_DATASETS:
         tokeniser = setup_tokeniser()
-        train_set = get_text_dataset(config.dataset, split="train")
-        val_set = get_text_dataset(config.dataset, split="validation")
+        train_set = get_text_dataset(config.dataset, split="train", max_length=config.interpolant.max_length)
+        val_set = get_text_dataset(config.dataset, split="validation", max_length=config.interpolant.max_length)
         train_loader = DataLoader(
             train_set, batch_size=config.training.batch_size, shuffle=True
         )

@@ -295,8 +295,48 @@ class AnyOrderMaskInsertionInterpolant(Interpolant):
         )
 
 
+class vanilla_MDM_Interpolant(Interpolant):
+    def __init__(self, mask_schedule: Schedule, vocab_size: int, mask_token: int, pad_token: int, max_length: int):
+        super().__init__(mask_schedule, vocab_size, mask_token, pad_token, max_length)
+        
+    def stopping_rate(self, t: Tensor, x1: Tensor) -> Tensor:
+        """
+        t2 is sampled from a uniform distribution over [0, 1]
+        t1 is always 0
+        """
+        B, L = x1.shape
+        eps = 1e-6
+        t2 = eps + torch.rand((B, L), device=x1.device) * (1-eps) # address the issue of t2 = 0
+        t1 = torch.zeros((B, L), device=x1.device)
+        return torch.stack([t1, t2], dim=2)
+    
+    def elbo_weight(self, t: Tensor, x1: Tensor):
+        """
+        Return the ELBO weight for the training, can be changed depends on the empirical results
+        there's no weight_delete for the vanilla MDM
+        """
+        weight_unmask = self.mask_schedule.rate_scale_factor(t)
+        weight_unmask_expanded = weight_unmask.unsqueeze(1).expand(-1, x1.shape[1]) # (B,L)
+        return weight_unmask_expanded
+    
+    def to_actual_rate(self, xt: Tensor, rate: ReparametrizedRate, t: Tensor) -> Rate:
+        """
+        Return the actual rate for the sampling
+        """
+        ## TODO: Implement the actual rate ##
+        return rate
 
-
+    def sample_interpolant(self, t: Tensor, x1: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        We do not use the sample_interpolant for the vanilla MDM
+        """
+        return None
+    
+    def reparametrised_conditional_rate(self, xt: Tensor, st: Tensor, t: Tensor, x1: Tensor) -> ReparametrizedRate:
+        """
+        We do not use the reparametrised_conditional_rate for the vanilla MDM
+        """
+        return None
 
 
 
