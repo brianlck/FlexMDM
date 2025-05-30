@@ -2,13 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-
 from einops import rearrange
 from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
 from omegaconf import OmegaConf
-
 from interpolant import ReparametrizedRate
-
 from . import rotary
 from .fused_add_dropout_scale import (
     bias_dropout_add_scale_fused_train,
@@ -397,7 +394,3 @@ class AnyOrderMaskInsertionFlow(nn.Module):
         return ReparametrizedRate(
             per_token_posterior=per_token_posterior, length_posterior=length_posterior
         )
-
-
-# p(st | xt)
-# For i=0...dim(xt). E[insertion at position i| xt]

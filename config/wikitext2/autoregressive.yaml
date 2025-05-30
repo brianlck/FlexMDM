@@ -6,11 +6,7 @@ model:
   dropout: 0.1
   n_blocks: 4
 interpolant:
-  type: "any-order"
   max_length: 512
-  mask_schedule:
-    min: 5
-    max: 0.01
 training:
   batch_size: 32
   learning_rate: 0.0001
