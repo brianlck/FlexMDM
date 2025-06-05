@@ -13,9 +13,7 @@ interpolant:
   mask_token: null # filled in automatically
   max_length: 512
   insert_schedule:
-    type: "geometric"
-    min: 5
-    max: 0.01
+    type: "linear"
   unmask_schedule:
     type: "linear"
 training:
@@ -29,6 +27,7 @@ training:
   loss_fn:
     unmask: "elbo"
     insert: "expectation"
+  warmup_steps: 1000
 wandb:
   entity: "jaeyeon_kim-harvard-university"
   project: "interpretable-flow"
