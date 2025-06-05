@@ -44,7 +44,7 @@ class TransdimensionalFlowModule(pl.LightningModule):
 
         # Initialize Masking Schedule
         if args.mask_schedule_type == "geometric":
-            mask_schedule = GeometricSchedule(min=5.0, max=0.01)
+            mask_schedule = GeometricSchedule(min_val=5.0, max_val=0.01)
         elif args.mask_schedule_type == "linear":
             mask_schedule = LinearSchedule()
         else:
@@ -118,7 +118,12 @@ class TransdimensionalFlowModule(pl.LightningModule):
             len_loss = mse(len_posterior, gap_one_hot).mean()
         elif self.len_predict_type == "expectation":
             # gap_counts: B X (L+1), len_posterior: B X (L+1), weight_delete: B X (L+1)
-            len_loss = scalar_bregman(gap_counts.to(len_posterior.dtype), len_posterior) * weight_delete
+            # boolean tensor of clean (including masked) tokens
+            not_pad_tokens = (xt != self.config.interpolant.pad_token) # B X L
+            left_pad_tensor = torch.ones((batch_size, 1), dtype = torch.bool, device = xt.device)
+            not_pad_tokens = torch.cat([left_pad_tensor, not_pad_tokens], dim = 1) # B X (L+1)
+
+            len_loss = scalar_bregman(gap_counts[not_pad_tokens].to(len_posterior.dtype), len_posterior[not_pad_tokens]) * weight_delete[not_pad_tokens]
             len_loss = len_loss.sum() / (batch_size * self.config.interpolant.max_length)
         else:
             raise ValueError(f"Invalid length prediction type: {self.len_predict_type}")
