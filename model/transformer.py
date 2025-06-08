@@ -5,7 +5,7 @@ import math
 from einops import rearrange
 from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
 from omegaconf import OmegaConf
-from interpolant import ReparametrizedRate
+from interpolant import ModelPrediction
 from . import rotary
 from .fused_add_dropout_scale import (
     bias_dropout_add_scale_fused_train,
@@ -31,7 +31,6 @@ class LayerNorm(nn.Module):
         with torch.amp.autocast("cuda", enabled=False):
             x = F.layer_norm(x.float(), [self.dim])
         return x * self.weight[None, None, :]
-
 
 
 #################################################################################
@@ -129,6 +128,7 @@ class ScalarLengthHead(nn.Module):
         s = self.proj2(self.act(self.proj1(x_fp32)))
         out = self.softplus(s).squeeze(-1) * self.normalized_len
         return out.to(x.dtype)
+
 
 #################################################################################
 #                                 Core Model                                    #
@@ -248,70 +248,6 @@ class DDitFinalLayer(nn.Module):
         return x
 
 
-class SemiAutoregressiveFlow(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-
-        # hack to make loading in configs easier
-        if isinstance(config, dict):
-            config = OmegaConf.create(config)
-
-        self.config = config
-        vocab_size = config.interpolant.tokens
-
-        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, vocab_size)
-        self.sigma_map = TimestepEmbedder(config.model.cond_dim)
-        self.rotary_emb = rotary.Rotary(
-            config.model.hidden_size // config.model.n_heads
-        )
-
-        self.blocks = nn.ModuleList(
-            [
-                DDiTBlock(
-                    config.model.hidden_size,
-                    config.model.n_heads,
-                    config.model.cond_dim,
-                    dropout=config.model.dropout,
-                )
-                for _ in range(config.model.n_blocks)
-            ]
-        )
-
-        self.output_layer = DDitFinalLayer(
-            config.model.hidden_size, vocab_size, config.model.cond_dim
-        )
-        # Default to per-sequence scalar prediction
-        self.len_pred = CombinedHead(
-            config.model.hidden_size,
-            config.interpolant.max_length + 1,
-            config.model.cond_dim,
-        )
-
-    def _get_bias_dropout_scale(self):
-        return (
-            bias_dropout_add_scale_fused_train
-            if self.training
-            else bias_dropout_add_scale_fused_inference
-        )
-
-    def forward(self, indices, t):
-        x = self.vocab_embed(indices)
-        c = F.silu(self.sigma_map(t))
-
-        rotary_cos_sin = self.rotary_emb(x)
-
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            for i in range(len(self.blocks)):
-                x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
-
-            per_token_posterior = F.softmax(self.output_layer(x, c), dim=-1)
-            length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
-
-        return ReparametrizedRate(
-            per_token_posterior=per_token_posterior, length_posterior=length_posterior
-        )
-
-
 class AnyOrderMaskInsertionFlow(nn.Module):
     def __init__(self, config, len_predict_type):
         super().__init__()
@@ -348,11 +284,17 @@ class AnyOrderMaskInsertionFlow(nn.Module):
         )
 
         self.len_predict_type = len_predict_type
-        if self.len_predict_type == 'distribution':
-            self.len_pred = DDitFinalLayer(config.model.hidden_size, config.interpolant.max_length+1, config.model.cond_dim)
-        elif self.len_predict_type == 'expectation':
+        if self.len_predict_type == "distribution":
+            self.len_pred = DDitFinalLayer(
+                config.model.hidden_size,
+                config.interpolant.max_length + 1,
+                config.model.cond_dim,
+            )
+        elif self.len_predict_type == "expectation":
             normalized_len = config.interpolant.max_length
-            self.len_pred = ScalarLengthHead(config.model.hidden_size, normalized_len, config.model.cond_dim)
+            self.len_pred = ScalarLengthHead(
+                config.model.hidden_size, normalized_len, config.model.cond_dim
+            )
         else:
             raise ValueError(f"Invalid length prediction type: {self.len_predict_type}")
 
@@ -384,13 +326,16 @@ class AnyOrderMaskInsertionFlow(nn.Module):
                 x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
 
             # --- unmasking ---
-            per_token_posterior = self.output_layer(x[:, :-1], c)
+            token_posterior = self.output_layer(x[:, :-1], c)
             # --- length prediction ---
-            if self.len_predict_type == 'distribution': # p(insertions | xt)
-                length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
-            elif self.len_predict_type == 'expectation': # E[insertions | xt]
-                length_posterior = self.len_pred(x, c)
-
-        return ReparametrizedRate(
-            per_token_posterior=per_token_posterior, length_posterior=length_posterior
-        )
+            match self.len_predict_type:
+                case "prediction":
+                    length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
+                    return ModelPrediction(
+                        token_posterior=token_posterior,
+                        length_posterior=length_posterior,
+                    )
+                case "expectation":
+                    return ModelPrediction(
+                        token_posterior=token_posterior, exected_gas=self.len_pred(x, c)
+                    )
