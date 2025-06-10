@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=vlmdm_test_run_linear
 #SBATCH --account=kempner_sham_lab
-#SBATCH --partition=kempner_h100
+#SBATCH --partition=kempner
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=100GB
@@ -17,4 +17,4 @@ source ~/.bashrc
 conda deactivate
 conda activate jay_vlmdm
 
-python train.py --mask_schedule_type linear --unmask_loss_type ce --len_predict_type expectation --len_loss_scheduler --wandb
+python train.py --insertion_schedule_type linear --len_loss_scheduler --wandb
