@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.utilities import rank_zero_only
 import os
 import argparse
 from omegaconf import OmegaConf
@@ -22,16 +23,16 @@ class TransdimensionalFlowModule(pl.LightningModule):
         self.config = config
         self.model_type = config.interpolant.type
         self.learning_rate = config.training.learning_rate
-        self.loss_brian = args.loss_brian
         self.unmask_loss_type = args.unmask_loss_type
         self.len_predict_type = args.len_predict_type
+        self.len_loss_scheduler = args.len_loss_scheduler
 
         # Initialize model based on type
         self.model = AnyOrderMaskInsertionFlow(config, self.len_predict_type)
 
         # Initialize Masking Schedule
         if args.mask_schedule_type == "geometric":
-            mask_schedule = GeometricSchedule(min=5.0, max=0.01)
+            mask_schedule = GeometricSchedule(min_val=5.0, max_val=0.01)
         elif args.mask_schedule_type == "linear":
             mask_schedule = LinearSchedule()
         else:
@@ -88,8 +89,8 @@ class TransdimensionalFlowModule(pl.LightningModule):
                 )
                 insertion_loss = insertion_loss.mean()
 
-        total_loss = unmask_loss + insertion_loss
-        return unmask_loss, insertion_loss, total_loss
+        unmask_loss + insertion_loss
+        return unmask_loss, insertion_loss
 
     def training_step(self, batch, batch_idx):
         # Extract input data
@@ -99,7 +100,17 @@ class TransdimensionalFlowModule(pl.LightningModule):
         x1 = batch
         batch_size = x1.shape[0]
         t = torch.rand(batch_size, device=x1.device)
-        unmask_loss, len_loss, loss = self.training_loss(x1, t)
+
+        unmask_loss, len_loss = self.training_loss(x1, t)
+
+        if self.len_loss_scheduler:
+            warmup_steps = self.config.training.warmup_steps
+            alpha = float(self.global_step) / float(warmup_steps)
+            alpha = max(0.0, min(1.0, alpha))
+        else:
+            alpha = 1.0
+        
+        loss = unmask_loss + alpha * len_loss
 
         self.log("train/unmask_loss", unmask_loss, prog_bar=True)
         self.log("train/len_loss", len_loss, prog_bar=True)
@@ -115,10 +126,10 @@ class TransdimensionalFlowModule(pl.LightningModule):
         batch_size = x1.shape[0]
 
         t = torch.rand(batch_size, device=x1.device)
-        if self.loss_brian:
-            unmask_loss, len_loss, loss = self.brian_training_loss(x1, t)
-        else:
-            unmask_loss, len_loss, loss = self.training_loss(x1, t)
+        unmask_loss, len_loss = self.training_loss(x1, t)
+
+        # no scheduler for validation
+        loss = unmask_loss + len_loss
 
         self.log("val/unmask_loss", unmask_loss, prog_bar=True)
         self.log("val/len_loss", len_loss, prog_bar=True)
@@ -127,7 +138,19 @@ class TransdimensionalFlowModule(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
+        warmup_steps = self.config.training.warmup_steps
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor = 0.01, end_factor = 1.0, total_iters = warmup_steps
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
 
     def on_save_checkpoint(self, checkpoint):
         checkpoint["config"] = self.config
@@ -155,26 +178,27 @@ class TransdimensionalFlowModule(pl.LightningModule):
 def train(args):
     # set the random seed
     pl.seed_everything(42)
-    torch.manual_seed(42)
-
     # Load config
     config = OmegaConf.load(args.config)
-    if args.wandb:
-        wandb.init(
-            project="interpretable-flow",
-            entity=args.wandb_entity,
-            config=OmegaConf.to_container(config, resolve=True),
-            name=os.path.basename(args.config),
-        )
-        wandb_logger = WandbLogger(
-            project=wandb.run.project,
-            name=wandb.run.name,
-            log_model=True,
-        )
-    else:
-        wandb_logger = None
+    wandb_logger = None
+    
+    @rank_zero_only
+    def _init_wandb():
+        nonlocal wandb_logger
+        if args.wandb:
+            wandb.init(project="interpretable-flow", entity=args.wandb_entity, config=OmegaConf.to_container(config, resolve=True),
+                name=f"VLMDM_{args.unmask_loss_type}_{args.len_predict_type}_{args.mask_schedule_type}_{args.len_loss_scheduler}",
+            )
+            wandb_logger = WandbLogger(
+                project=wandb.run.project,
+                name=wandb.run.name,
+                log_model=True,
+            )
+        else:
+            wandb_logger = None
 
     time_string = datetime.now().strftime("%Y%m%d-%H%M%S")
+    _init_wandb()
 
     config.training.checkpoint_dir = os.path.join(
         config.training.checkpoint_dir, time_string
@@ -214,6 +238,11 @@ def train(args):
             shuffle=False,
         )
 
+    # calculate max steps
+    print(len(train_loader))
+    total_iters = config.training.num_epochs * len(train_loader)
+    config.training.warmup_steps = int(total_iters * 0.01)
+    
     # Initialize model
     model = TransdimensionalFlowModule(config, args)
 
@@ -239,7 +268,10 @@ def train(args):
     )
 
     if args.wandb:
-        wandb.finish()
+        @rank_zero_only
+        def _finish_wandb():
+            wandb.finish()
+        _finish_wandb()
 
 
 if __name__ == "__main__":
@@ -276,12 +308,8 @@ if __name__ == "__main__":
         default="distribution",
     )
     parser.add_argument("--wandb", action="store_true", help="whether to use wandb")
-    parser.add_argument(
-        "--wandb_entity",
-        type=str,
-        help="wandb entity",
-        default="jaeyeon_kim-harvard-university",
-    )
+    parser.add_argument("--len_loss_scheduler", action = "store_true", help = "whether to use len loss scheduler")
+    parser.add_argument("--wandb_entity", type=str, help="wandb entity", default = "jaeyeon_kim-harvard-university")
 
     args = parser.parse_args()
     train(args)

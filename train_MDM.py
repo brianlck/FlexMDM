@@ -3,6 +3,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.utilities import rank_zero_only
 import os
 import argparse
 from omegaconf import OmegaConf
@@ -95,7 +96,19 @@ class MDM(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
+        warmup_steps = self.config.training.warmup_steps
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor = 0.01, end_factor = 1.0, total_iters = warmup_steps
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
 
     def on_save_checkpoint(self, checkpoint):
         checkpoint["config"] = self.config
@@ -106,22 +119,26 @@ class MDM(pl.LightningModule):
 def train(args):
     # set the random seed
     pl.seed_everything(42)
-    torch.manual_seed(42)
-
     # Load config
     config = OmegaConf.load(args.config)
-    if args.wandb:
-        wandb.init(project="interpretable-flow", entity=args.wandb_entity, config=OmegaConf.to_container(config, resolve=True),
-            name=os.path.basename(args.config),
-        )
-        wandb_logger = WandbLogger(
-            project=wandb.run.project,
-            name=wandb.run.name,
-            log_model=True,
-        )
-    else:
-        wandb_logger = None
 
+    wandb_logger = None
+    @rank_zero_only
+    def _init_wandb():
+        nonlocal wandb_logger
+        if args.wandb:
+            wandb.init(project="interpretable-flow", entity=args.wandb_entity, config=OmegaConf.to_container(config, resolve=True),
+                name= f"MDM_{args.mask_schedule_type}",
+            )
+            wandb_logger = WandbLogger(
+                project=wandb.run.project,
+                name=wandb.run.name,
+                log_model=True,
+            )
+        else:
+            wandb_logger = None
+
+    _init_wandb()
     time_string = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     config.training.checkpoint_dir = os.path.join(
@@ -159,6 +176,10 @@ def train(args):
             shuffle=False,
         )
 
+    # calculate max steps
+    total_iters = config.training.num_epochs * len(train_loader)
+    config.training.warmup_steps = int(total_iters * 0.01)
+    
     # Initialize model
     model = MDM(config, args)
 
@@ -169,10 +190,12 @@ def train(args):
         accelerator="gpu",
         devices=config.training.devices,
         log_every_n_steps=100,
+        gradient_clip_val = 1.0,
         enable_checkpointing=True,
     )
     if wandb_logger is not None:
         trainer_kwargs["logger"] = wandb_logger
+
     trainer = pl.Trainer(**trainer_kwargs)
 
     # Train the model
