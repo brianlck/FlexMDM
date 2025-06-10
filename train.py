@@ -31,16 +31,16 @@ class TransdimensionalFlowModule(pl.LightningModule):
         self.model = AnyOrderMaskInsertionFlow(config, self.len_predict_type)
 
         # Initialize Masking Schedule
-        if args.mask_schedule_type == "geometric":
-            mask_schedule = GeometricSchedule(min_val=5.0, max_val=0.01)
-        elif args.mask_schedule_type == "linear":
-            mask_schedule = LinearSchedule()
+        if args.insertion_schedule_type == "geometric":
+            insertion_schedule = GeometricSchedule(min_val=5.0, max_val=0.01)
+        elif args.insertion_schedule_type == "linear":
+            insertion_schedule = LinearSchedule()
         else:
-            raise ValueError(f"Invalid mask schedule type: {args.mask_schedule_type}")
+            raise ValueError(f"Invalid mask schedule type: {args.insertion_schedule_type}")
 
         # Initialize interpolant
         self.interpolant = AnyOrderMaskInsertionInterpolant(
-            mask_schedule=mask_schedule,
+            insertion_schedule = insertion_schedule,
             vocab_size=config.interpolant.tokens,
             mask_token=config.interpolant.mask_token,
             pad_token=config.interpolant.pad_token,
@@ -54,6 +54,7 @@ class TransdimensionalFlowModule(pl.LightningModule):
         return self.model(x, t)
 
     def training_loss(self, x1, t):
+        batch_size = x1.shape[0]
         interpolant_sample = self.interpolant.sample_interpolant(t, x1)
         unmask_weight, insert_weight = self.interpolant.elbo_weight(t, x1)
 
@@ -62,22 +63,27 @@ class TransdimensionalFlowModule(pl.LightningModule):
         match self.unmask_loss_type:
             case "elbo":
                 mask_indices = interpolant_sample.mask_indices
-                unmask_loss = unmask_weight * F.cross_entropy(
+                unmask_loss = unmask_weight[mask_indices] * F.cross_entropy(
                     prediction.token_posterior[mask_indices],
-                    interpolant_sample.unmasked[mask_indices],
+                    interpolant_sample.x1_remained[mask_indices],
                     reduction="none",
                 )
-                unmask_loss = unmask_loss.mean()
+                unmask_loss = unmask_loss.sum() / (batch_size * self.config.interpolant.max_length)
 
             case _:
                 raise ValueError(f"Invalid unmask loss type: {self.unmask_loss_type}")
 
         match self.len_predict_type:
             case "expectation":
-                insertion_loss = insert_weight * jump_kernel_elbo(
-                    prediction.expected_gaps, interpolant_sample.gaps
+                # boolean tensor of clean (including masked) tokens
+                not_pad_tokens = (interpolant_sample.xt != self.config.interpolant.pad_token) # B X L
+                left_pad_tensor = torch.ones((batch_size, 1), dtype = torch.bool, device = interpolant_sample.xt.device)
+                not_pad_tokens = torch.cat([left_pad_tensor, not_pad_tokens], dim = 1) # B X (L+1)
+
+                insertion_loss = insert_weight[not_pad_tokens] * jump_kernel_elbo(
+                    interpolant_sample.gap_counts[not_pad_tokens], prediction.expected_gaps[not_pad_tokens] 
                 )
-                insertion_loss = insertion_loss.mean()
+                insertion_loss = insertion_loss.sum() / (batch_size * self.config.interpolant.max_length)
 
             case "distribution":
                 gap_one_hot = F.one_hot(
@@ -89,7 +95,6 @@ class TransdimensionalFlowModule(pl.LightningModule):
                 )
                 insertion_loss = insertion_loss.mean()
 
-        unmask_loss + insertion_loss
         return unmask_loss, insertion_loss
 
     def training_step(self, batch, batch_idx):
@@ -167,7 +172,7 @@ class TransdimensionalFlowModule(pl.LightningModule):
         interpolant_state = checkpoint["interpolant_state"]
 
         self.interpolant = AnyOrderMaskInsertionInterpolant(
-            mask_schedule=GeometricSchedule(min=5.0, max=0.01),
+            insertion_schedule=GeometricSchedule(min=5.0, max=0.01),
             vocab_size=interpolant_state["vocab_size"],
             mask_token=interpolant_state["mask_token"],
             pad_token=interpolant_state["pad_token"],
@@ -187,7 +192,7 @@ def train(args):
         nonlocal wandb_logger
         if args.wandb:
             wandb.init(project="interpretable-flow", entity=args.wandb_entity, config=OmegaConf.to_container(config, resolve=True),
-                name=f"VLMDM_{args.unmask_loss_type}_{args.len_predict_type}_{args.mask_schedule_type}_{args.len_loss_scheduler}",
+                name=f"VLMDM_{args.insertion_schedule_type}_{args.len_loss_scheduler}",
             )
             wandb_logger = WandbLogger(
                 project=wandb.run.project,
@@ -289,23 +294,23 @@ if __name__ == "__main__":
         default="any-order",
     )
     parser.add_argument(
-        "--mask_schedule_type",
+        "--insertion_schedule_type",
         type=str,
-        help="which mask schedule to use: currently supports geometric and linear",
-        default="geometric",
+        help="which insertion schedule to use: currently supports geometric and linear",
+        default="linear",
     )
     parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from")
     parser.add_argument(
         "--unmask_loss_type",
         type=str,
         help="which unmask loss to use: cross entropy or mse",
-        default="ce",
+        default="elbo",
     )
     parser.add_argument(
         "--len_predict_type",
         type=str,
         help="which length prediction to use: distribution (p(s_t | x_t, t)) or expectation (E[s_t | x_t, t])",
-        default="distribution",
+        default="expectation",
     )
     parser.add_argument("--wandb", action="store_true", help="whether to use wandb")
     parser.add_argument("--len_loss_scheduler", action = "store_true", help = "whether to use len loss scheduler")
