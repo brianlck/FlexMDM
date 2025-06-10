@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=vlmdm_test_run_linear
 #SBATCH --account=kempner_sham_lab
-#SBATCH --partition=kempner_h100
+#SBATCH --partition=kempner
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=100GB

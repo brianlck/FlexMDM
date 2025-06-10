@@ -36,7 +36,6 @@ def train(config: DictConfig):
         wandb_logger = None
 
     time_string = datetime.now().strftime("%Y%m%d-%H%M%S")
-    _init_wandb()
 
     config.training.checkpoint_dir = os.path.join(
         config.training.checkpoint_dir, time_string
