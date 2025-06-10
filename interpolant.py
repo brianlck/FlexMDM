@@ -52,6 +52,8 @@ class JointInterpolantResult:
     _x1: Tensor
     _pad_token: int
     _mask_token: int
+    x1_remained: Tensor
+    gap_counts: Tensor
 
     @property
     def mask_indices(self) -> Tensor:
@@ -223,8 +225,9 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
             x1_remained: [B, L] tokens that are not deleted, used for the training target
             gap_counts: [B, L+1] the number of deleted tokens between xt slots
         """
-        # sample the stopping time (B, L, 2)
+        # sample the stopping time (B, L) / (B, L)
         insertion_time, unmasking_time = self.hitting_time(t, x1)
+        t_expand = t.unsqueeze(1).expand_as(insertion_time)
 
         clean_tokens = x1.ne(self.pad_token)
         deleted_tokens = clean_tokens & (t[:, None] < insertion_time)
@@ -234,7 +237,7 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
             & (t[:, None] < unmasking_time)
         )
 
-        xt = torch.where(
+        values = torch.where(
             deleted_tokens,
             self.pad_token,  # for deletion, change to pad token
             torch.where(
@@ -244,11 +247,30 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
             ),
         )
 
-        st = xt.ne(self.pad_token).argsort(dim=1, descending=True)
-        xt = torch.gather(xt, 1, st)
+        st = values.ne(self.pad_token)
+        keep_idx = st.argsort(dim = 1, descending = True)
+        xt = torch.gather(values, 1, keep_idx)
+
+        # output remained_x1
+        x1_tokens = torch.where(deleted_tokens, self.pad_token, x1)
+        x1_remained = torch.gather(x1_tokens, 1, keep_idx)
+
+        # gap counts
+        B, L = x1.shape
+        pos = torch.arange(L , device = x1.device)
+        sentinel = L
+        st_idx = torch.where(st, pos, sentinel)
+        sorted_st , _ = torch.sort(st_idx, dim=1)
+        x1_len = (x1 != self.pad_token).sum(dim=1)
+        sorted_clamped = torch.minimum(sorted_st, x1_len.unsqueeze(1))
+        pad_front = x1.new_zeros((B, 1)) - 1
+        pad_back = x1_len.unsqueeze(1)
+        padded = torch.cat([pad_front, sorted_clamped, pad_back], dim=1)  # (B, L+2)
+        gap_counts = padded[:, 1:] - padded[:, :-1] - 1  # (B, L+1)
+        gap_counts = gap_counts.clamp(min=0)
 
         return JointInterpolantResult(
-            xt=xt, st=st, _x1=x1, _pad_token=self.pad_token, _mask_token=self.mask_token
+            xt=xt, st=st, _x1=x1, _pad_token=self.pad_token, _mask_token=self.mask_token, x1_remained=x1_remained, gap_counts = gap_counts 
         )
 
 
