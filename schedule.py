@@ -1,7 +1,18 @@
 import abc
+from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 from torch import Tensor
+
+
+def get_schedule_from_config(config: DictConfig):
+    match config.type:
+        case "geometric":
+            return GeometricSchedule(min=config.min, max=config.max)
+        case "linear":
+            return LinearSchedule()
+        case _:
+            raise ValueError(f"Invalid schedule type: {config.type}")
 
 
 class Schedule(abc.ABC):

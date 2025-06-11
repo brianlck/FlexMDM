@@ -8,6 +8,7 @@ model:
 interpolant:
   max_length: 512
   mask_schedule:
+    type: "geometric"
     min: 5
     max: 0.01
 training:

@@ -19,3 +19,4 @@ lightning_logs/
 
 # slurm_logs
 slurm_logs
+outputs/

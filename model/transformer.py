@@ -337,5 +337,6 @@ class AnyOrderMaskInsertionFlow(nn.Module):
                     )
                 case "expectation":
                     return ModelPrediction(
-                        token_posterior=token_posterior, exected_gas=self.len_pred(x, c)
+                        token_posterior=token_posterior,
+                        expected_gaps=self.len_pred(x, c),
                     )

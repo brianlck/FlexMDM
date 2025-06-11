@@ -12,6 +12,7 @@ interpolant:
   mask_token: 0
   pad_token: 3
   mask_schedule:
+    type: "geometric"
     min: 5
     max: 0.01
 training:

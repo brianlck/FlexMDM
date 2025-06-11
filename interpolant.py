@@ -15,8 +15,8 @@ class ModelPrediction:
     def __init__(
         self,
         token_posterior: Tensor,
-        length_posterior: Optional[Tensor],
-        expected_gaps: Optional[Tensor],
+        length_posterior: Optional[Tensor] = None,
+        expected_gaps: Optional[Tensor] = None,
     ):
         assert length_posterior is not None or expected_gaps is not None
         self.token_posterior = token_posterior
@@ -58,7 +58,7 @@ class JointInterpolantResult:
 
     @property
     def unmasked(self) -> Tensor:
-        return self._x1.gather(self.xt, 1, self.st)
+        return torch.gather(self._x1, 1, self.st)
 
     @property
     def x1_length(self) -> Tensor:
@@ -139,11 +139,13 @@ class JointInterpolant(abc.ABC):
         insertion_time, unmasking_time = self.hitting_time(t, x1)
 
         clean_tokens = x1.ne(self.pad_token)
-        deleted_tokens = clean_tokens & (self.insertion_schedule.at(t) < insertion_time)
+        deleted_tokens = clean_tokens & (
+            self.insertion_schedule.at(t)[:, None] < insertion_time
+        )
         masked_tokens = (
             clean_tokens
-            & (self.insertion_schedule.at(t) >= insertion_time)
-            & (t < unmasking_time)
+            & (self.insertion_schedule.at(t)[:, None] >= insertion_time)
+            & (t[:, None] < unmasking_time)
         )
 
         xt = torch.where(
@@ -177,7 +179,7 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
             insertion_schedule, vocab_size, mask_token, pad_token, max_length
         )
 
-    def hitting_time(self, t: Tensor, x1: Tensor) -> Tensor:
+    def hitting_time(self, t: Tensor, x1: Tensor) -> HittingTime:
         """
         t1 is sampled from a uniform distribution over [0, 1]. when t1 < self.mask_schedule.at(t)
         t2 is sampled from a uniform distribution over [t1, 1]
@@ -188,7 +190,10 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
             1 - eps
         )  # address the issue of t1 = 0
         t2 = t1 + torch.rand((B, L), device=x1.device) * (1 - t1)
-        return torch.stack([t1, t2], dim=2)
+        return HittingTime(
+            insertion_time=t1,  # (B, L)
+            unmasking_time=t2,  # (B, L)
+        )
 
     def elbo_weight(self, t: Tensor, x1: Tensor):
         """
