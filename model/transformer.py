@@ -326,17 +326,17 @@ class AnyOrderMaskInsertionFlow(nn.Module):
                 x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
 
             # --- unmasking ---
-            token_posterior = self.output_layer(x[:, :-1], c)
+            token_logits = self.output_layer(x[:, :-1], c)
             # --- length prediction ---
             match self.len_predict_type:
                 case "distribution":
                     length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
                     return ModelPrediction(
-                        token_posterior=token_posterior,
+                        token_logits=token_logits,
                         length_posterior=length_posterior,
                     )
                 case "expectation":
                     return ModelPrediction(
-                        token_posterior=token_posterior,
+                        token_logits=token_logits,
                         expected_gaps=self.len_pred(x, c),
                     )
