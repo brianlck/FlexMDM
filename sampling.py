@@ -87,7 +87,7 @@ def any_order_mask_insertion_euler_sampling(
         # ——— predict and convert rates ———
         pred_rate = model(xt, t)
         pred_rate = interpolant.to_actual_rate(xt, pred_rate, t)
-        unmask_rate = pred_rate.unmask_rate.softmax(dim=-1)  # (B, L, V)
+        unmask_rate = pred_rate.unmask_rate  # (B, L, V)
         len_rate = pred_rate.length_rate  # (B, L+1)
 
         # ——— unmask step (Euler) ———

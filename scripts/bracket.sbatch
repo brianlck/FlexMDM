@@ -11,4 +11,5 @@
 #SBATCH --output=slurm_logs/wikitext2/job-%j.out
 #SBATCH -C a100
 
-python train.py --config-path config/bracket --config-name any_order
+python train.py --config-path config/bracket --config-name any_order \
+    training.loss_fn.insert=distribution

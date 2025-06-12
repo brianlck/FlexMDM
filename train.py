@@ -54,7 +54,7 @@ class TransdimensionalFlowModule(pl.LightningModule):
             case "elbo":
                 mask_indices = interpolant_sample.mask_indices
                 unmask_loss = unmask_weight[mask_indices] * F.cross_entropy(
-                    prediction.token_posterior[mask_indices],
+                    prediction.token_logits[mask_indices],
                     interpolant_sample.unmasked[mask_indices],
                     reduction="none",
                 )
@@ -73,12 +73,13 @@ class TransdimensionalFlowModule(pl.LightningModule):
                 insertion_loss = insertion_loss.mean()
 
             case "distribution":
+                gaps, gaps_mask = interpolant_sample.gaps_and_mask
                 gap_one_hot = F.one_hot(
-                    interpolant_sample.gaps,
+                    gaps,
                     num_classes=self.config.interpolant.max_length + 1,
                 ).to(prediction.length_posterior.dtype)
-                insertion_loss = insert_weight * mse(
-                    prediction.length_posterior, gap_one_hot
+                insertion_loss = insert_weight[gaps_mask] * mse(
+                    prediction.length_posterior[gaps_mask], gap_one_hot[gaps_mask]
                 )
                 insertion_loss = insertion_loss.mean()
 

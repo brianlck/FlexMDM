@@ -4,27 +4,28 @@ import torch
 from torch import Tensor
 from dataclasses import dataclass
 from schedule import Schedule
+import torch.nn.functional as F
 
 
 @dataclass
 class ModelPrediction:
-    token_posterior: Tensor
+    token_logits: Tensor
     length_posterior: Optional[Tensor]
     expected_gaps: Tensor
 
     def __init__(
         self,
-        token_posterior: Tensor,
+        token_logits: Tensor,
         length_posterior: Optional[Tensor] = None,
         expected_gaps: Optional[Tensor] = None,
     ):
         assert length_posterior is not None or expected_gaps is not None
-        self.token_posterior = token_posterior
+        self.token_logits = token_logits
         self.length_posterior = length_posterior
         self.expected_gaps = expected_gaps
         if self.expected_gaps is None:
             _, _, L = self.length_posterior.shape
-            index = torch.arange(0, L, device=token_posterior.device).view(1, 1, -1)
+            index = torch.arange(0, L, device=token_logits.device).view(1, 1, -1)
             self.expected_gaps = (self.length_posterior * index).sum(dim=-1)
 
 
@@ -84,6 +85,7 @@ class JointInterpolantResult:
         )  # Fill the last position with x1_len
 
         gaps = gaps[:, 1:] - gaps[:, :-1] - 1
+        gaps = torch.clamp(gaps, min=0)
 
         idx = torch.arange(gaps.size(1), device=self.xt.device).unsqueeze(
             0
@@ -229,7 +231,8 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
             prediction: ModelPrediction object containing token_posterior and expected_gaps
             t: [B] the time parameter
         """
-        unmask_rate = prediction.token_posterior / (1 - t).view(-1, 1, 1)
+        token_posterior = F.softmax(prediction.token_logits, dim=-1)  # (B, L, V)
+        unmask_rate = token_posterior / (1 - t).view(-1, 1, 1)
         length_rate = (
             prediction.expected_gaps
             * self.insertion_schedule.rate_scale_factor(t).view(-1, 1)
