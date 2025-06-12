@@ -25,7 +25,7 @@ class TransdimensionalFlowModule(pl.LightningModule):
         self.insert_loss_fn = config.training.loss_fn.insert
 
         # Initialize model based on type
-        self.model = AnyOrderMaskInsertionFlow(config, self.insert_loss_fn)
+        self.model = AnyOrderMaskInsertionFlow(config, "distribution")
 
         schedule = get_schedule_from_config(config.interpolant.mask_schedule)
 
@@ -65,9 +65,11 @@ class TransdimensionalFlowModule(pl.LightningModule):
 
         match self.insert_loss_fn:
             case "expectation":
-                insertion_loss = insert_weight * jump_kernel_elbo(
-                    prediction.expected_gaps, interpolant_sample.gaps
+                gaps, gaps_mask = interpolant_sample.gaps_and_mask
+                insertion_loss = insert_weight[gaps_mask] * jump_kernel_elbo(
+                    prediction.expected_gaps[gaps_mask], gaps[gaps_mask]
                 )
+                print(prediction.expected_gaps[gaps_mask], gaps[gaps_mask])
                 insertion_loss = insertion_loss.mean()
 
             case "distribution":
@@ -125,9 +127,10 @@ class TransdimensionalFlowModule(pl.LightningModule):
         self.config = checkpoint["config"]
 
         self.interpolant = AnyOrderMaskInsertionInterpolant(
-            mask_schedule=get_schedule_from_config(
+            insertion_schedule=get_schedule_from_config(
                 self.config.interpolant.mask_schedule
             ),
+            vocab_size=self.config.interpolant.tokens,
             mask_token=self.config.interpolant.mask_token,
             pad_token=self.config.interpolant.pad_token,
             max_length=self.config.interpolant.max_length,

@@ -23,8 +23,8 @@ class ModelPrediction:
         self.length_posterior = length_posterior
         self.expected_gaps = expected_gaps
         if self.expected_gaps is None:
-            _, L = self.length_posterior.shape
-            index = torch.arange(0, L, device=token_posterior.device).view(1, -1)
+            _, _, L = self.length_posterior.shape
+            index = torch.arange(0, L, device=token_posterior.device).view(1, 1, -1)
             self.expected_gaps = (self.length_posterior * index).sum(dim=-1)
 
 
@@ -61,25 +61,36 @@ class JointInterpolantResult:
         return torch.gather(self._x1, 1, self.st)
 
     @property
+    def xt_length(self) -> Tensor:
+        # Calculate length of xt
+        return (self.xt != self._pad_token).sum(dim=1)
+
+    @property
     def x1_length(self) -> Tensor:
-        # Calculate x1_length
+        # Calculate length of x1
         return (self._x1 != self._pad_token).sum(dim=1)
 
     @property
-    def gaps(self) -> Tensor:
+    def gaps_and_mask(self) -> tuple[Tensor, Tensor]:
         x1_len = self.x1_length
         gaps = self.st.clone()
 
         pad_front = gaps.new_zeros((gaps.shape[0], 1)) - 1  # -1 for the front padding
         pad_back = gaps.new_zeros((gaps.shape[0], 1))
         gaps = torch.cat([pad_front, gaps, pad_back], dim=1)  # Add a leading zero
-        gaps.scatter(
-            1, x1_len.unsqueeze(1) + 1, x1_len.unsqueeze(1)
+
+        gaps.scatter_(
+            1, self.xt_length.unsqueeze(1) + 1, x1_len.unsqueeze(1)
         )  # Fill the last position with x1_len
 
-        return (
-            gaps[:, 1:] - gaps[:, :-1] - 1
-        )  # Calculate gaps between positions, subtracting 1 for the gap itself
+        gaps = gaps[:, 1:] - gaps[:, :-1] - 1
+
+        idx = torch.arange(gaps.size(1), device=self.xt.device).unsqueeze(
+            0
+        )  # shape [1, max_gap]
+        mask = idx <= self.xt_length.unsqueeze(1)
+
+        return gaps, mask
 
 
 class JointInterpolant(abc.ABC):
@@ -200,22 +211,28 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
         Return the ELBO weight for the training, can be changed depends on the empirical results
         """
         eps = 1e-6
-        weight_unmask = self.insertion_schedule.rate_scale_factor(t)
-        weight_unmask_expanded = weight_unmask.unsqueeze(1).expand(
-            -1, x1.shape[1]
-        )  # (B,L)
-        weight_delete = 1.0 / (1 - t + eps)
-        weight_delete_expanded = weight_delete.unsqueeze(1).expand(
-            -1, x1.shape[1] + 1
-        )  # (B,L+1)
-        return weight_unmask_expanded, weight_delete_expanded
+        insert_weight = self.insertion_schedule.rate_scale_factor(t)
+        insert_weight = insert_weight[:, None].expand(-1, x1.shape[1] + 1)
+
+        unmask_weight = 1.0 / (1 - t + eps)
+        unmask_weight = unmask_weight.unsqueeze(1).expand(-1, x1.shape[1])
+
+        return unmask_weight, insert_weight
 
     def to_actual_rate(
         self, xt: Tensor, prediction: ModelPrediction, t: Tensor
     ) -> Rate:
-        unmask_rate = prediction.token_posterior / (1 - t)
+        """
+        Return the actual rate for the sampling
+        Args:
+            xt: [B, L] the sampled tokens
+            prediction: ModelPrediction object containing token_posterior and expected_gaps
+            t: [B] the time parameter
+        """
+        unmask_rate = prediction.token_posterior / (1 - t).view(-1, 1, 1)
         length_rate = (
-            prediction.expected_gaps * self.insertion_schedule.rate_scale_factor(t)
+            prediction.expected_gaps
+            * self.insertion_schedule.rate_scale_factor(t).view(-1, 1)
         )
 
         return Rate(

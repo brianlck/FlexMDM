@@ -329,7 +329,7 @@ class AnyOrderMaskInsertionFlow(nn.Module):
             token_posterior = self.output_layer(x[:, :-1], c)
             # --- length prediction ---
             match self.len_predict_type:
-                case "prediction":
+                case "distribution":
                     length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
                     return ModelPrediction(
                         token_posterior=token_posterior,
