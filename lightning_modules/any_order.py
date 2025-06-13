@@ -53,7 +53,9 @@ class AnyOrderInsertionFlowModule(pl.LightningModule):
                     interpolant_sample.unmasked[mask_indices],
                     reduction="none",
                 )
-                unmask_loss = unmask_loss.mean()
+                unmask_loss = unmask_loss.sum() / (
+                    x1.shape[0] * self.config.interpolant.max_length
+                )
 
             case _:
                 raise ValueError(f"Invalid unmask loss type: {self.unmask_loss_fn}")
@@ -64,7 +66,9 @@ class AnyOrderInsertionFlowModule(pl.LightningModule):
                 insertion_loss = insert_weight[gaps_mask] * jump_kernel_elbo(
                     prediction.expected_gaps[gaps_mask], gaps[gaps_mask]
                 )
-                insertion_loss = insertion_loss.mean()
+                insertion_loss = insertion_loss.sum() / (
+                    x1.shape[0] * self.config.interpolant.max_length
+                )
 
             case "distribution":
                 gaps, gaps_mask = interpolant_sample.gaps_and_mask
@@ -75,7 +79,9 @@ class AnyOrderInsertionFlowModule(pl.LightningModule):
                 insertion_loss = insert_weight[gaps_mask] * mse(
                     prediction.length_posterior[gaps_mask], gap_one_hot[gaps_mask]
                 )
-                insertion_loss = insertion_loss.mean()
+                insertion_loss = insertion_loss.sum() / (
+                    x1.shape[0] * self.config.interpolant.max_length
+                )
 
         total_loss = unmask_loss + insertion_loss
         return unmask_loss, insertion_loss, total_loss
