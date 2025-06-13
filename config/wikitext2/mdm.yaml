@@ -8,7 +8,10 @@ model:
   n_blocks: 4
 interpolant:
   max_length: 512
-  mask_schedule:
+  tokens: null  # filled in automatically
+  pad_token: null  # filled in automatically
+  mask_token: null  # filled in automatically
+  unmask_schedule:
     type: "linear"
 training:
   batch_size: 32

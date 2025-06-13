@@ -40,12 +40,12 @@ class MaskedDiffusionModule(pl.LightningModule):
 
         # model prediction
         predicted_logits = self(interpolant_result.xt, t)
-        mask_indicies = interpolant_result.mask_indicies
+        mask_indices = interpolant_result.mask_indices
 
         # compute unmask loss
-        loss = unmask_weight[mask_indicies] * F.cross_entropy(
-            predicted_logits[mask_indicies],
-            interpolant_result.unmasked[mask_indicies],
+        loss = unmask_weight[mask_indices] * F.cross_entropy(
+            predicted_logits[mask_indices],
+            interpolant_result.unmasked[mask_indices],
             reduction="none",
         )
 

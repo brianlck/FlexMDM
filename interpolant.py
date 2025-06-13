@@ -55,7 +55,7 @@ class JointInterpolantResult:
 
     @property
     def mask_indices(self) -> Tensor:
-        return self.xt != self._mask_token
+        return self.xt == self._mask_token
 
     @property
     def unmasked(self) -> Tensor:
@@ -279,7 +279,7 @@ class MDMInterpolant(JointInterpolant):
         Return the ELBO weight for the training, can be changed depends on the empirical results
         there's no weight_delete for the vanilla MDM
         """
-        weight_unmask = self.mask_schedule.rate_scale_factor(t)
+        weight_unmask = self.unmask_schedule.rate_scale_factor(t)
         weight_unmask_expanded = weight_unmask.unsqueeze(1).expand(
             -1, x1.shape[1]
         )  # (B,L)

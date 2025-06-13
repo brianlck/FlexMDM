@@ -64,7 +64,6 @@ class AnyOrderInsertionFlowModule(pl.LightningModule):
                 insertion_loss = insert_weight[gaps_mask] * jump_kernel_elbo(
                     prediction.expected_gaps[gaps_mask], gaps[gaps_mask]
                 )
-                print(prediction.expected_gaps[gaps_mask], gaps[gaps_mask])
                 insertion_loss = insertion_loss.mean()
 
             case "distribution":

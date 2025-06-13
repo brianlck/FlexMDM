@@ -5,7 +5,7 @@ from model.casual_transformer import CausalDiT
 
 
 class AutoregressiveModule(pl.LightningModule):
-    def __init__(self, config, args):
+    def __init__(self, config):
         super().__init__()
         self.config = config
         self.learning_rate = config.training.learning_rate

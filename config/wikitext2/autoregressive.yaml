@@ -8,6 +8,9 @@ model:
   n_blocks: 4
 interpolant:
   max_length: 512
+  tokens: null  # filled in automatically
+  pad_token: null  # filled in automatically
+  mask_token: null  # filled in automatically
 training:
   batch_size: 32
   learning_rate: 0.0001
@@ -16,3 +19,8 @@ training:
   checkpoint_dir: "checkpoints/wikitext2"
   save_top_k: 1
   save_every_n_epochs: 1
+wandb:
+  entity: "jaeyeon_kim-harvard-university"
+  project: "interpretable-flow"
+  name: "wikitext2-any-order"
+  
