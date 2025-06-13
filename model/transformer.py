@@ -249,7 +249,7 @@ class DDitFinalLayer(nn.Module):
 
 
 class AnyOrderMaskInsertionFlow(nn.Module):
-    def __init__(self, config, len_predict_type):
+    def __init__(self, config):
         super().__init__()
 
         # hack to make loading in configs easier
@@ -283,7 +283,7 @@ class AnyOrderMaskInsertionFlow(nn.Module):
             config.model.hidden_size, self.vocab_size, config.model.cond_dim
         )
 
-        self.len_predict_type = len_predict_type
+        self.len_predict_type = config.training.loss_fn.insert
         if self.len_predict_type == "distribution":
             self.len_pred = DDitFinalLayer(
                 config.model.hidden_size,

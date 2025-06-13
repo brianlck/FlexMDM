@@ -98,7 +98,6 @@ class JointInterpolantResult:
 class JointInterpolant(abc.ABC):
     def __init__(
         self,
-        insertion_schedule: Schedule,
         vocab_size: int,
         mask_token: int,
         pad_token: int,
@@ -111,14 +110,6 @@ class JointInterpolant(abc.ABC):
         self.pad_token = pad_token
         self.max_length = max_length
         self.vocab_size = vocab_size
-        self.insertion_schedule = insertion_schedule
-
-    @abc.abstractmethod
-    def hitting_time(self, t: Tensor, x1: Tensor) -> HittingTime:
-        """
-        Return the stopping time for each token in x1
-        """
-        raise NotImplementedError
 
     @abc.abstractmethod
     def elbo_weight(self, t: Tensor, x1: Tensor):
@@ -136,8 +127,10 @@ class JointInterpolant(abc.ABC):
     def to_actual_rate(self, prediction: ModelPrediction, t: Tensor) -> Rate:
         raise NotImplementedError
 
+    @abc.abstractmethod
     def sample_interpolant(self, t: Tensor, x1: Tensor) -> JointInterpolantResult:
         """
+        Sample the interpolant xt from x1 at time t
         Shapes:
             x1: [B, L]
             t: [B]
@@ -148,65 +141,38 @@ class JointInterpolant(abc.ABC):
             x1_remained: [B, L] tokens that are not deleted, used for the training target
             gap_counts: [B, L+1] the number of deleted tokens between xt slots
         """
-        # sample the stopping time (B, L, 2)
-        insertion_time, unmasking_time = self.hitting_time(t, x1)
-
-        clean_tokens = x1.ne(self.pad_token)
-        deleted_tokens = clean_tokens & (
-            self.insertion_schedule.at(t)[:, None] < insertion_time
-        )
-        masked_tokens = (
-            clean_tokens
-            & (self.insertion_schedule.at(t)[:, None] >= insertion_time)
-            & (t[:, None] < unmasking_time)
-        )
-
-        xt = torch.where(
-            deleted_tokens,
-            self.pad_token,  # for deletion, change to pad token
-            torch.where(
-                masked_tokens,
-                self.mask_token,  # for masking, change to mask token
-                x1,
-            ),
-        )
-
-        st = xt.ne(self.pad_token).argsort(dim=1, descending=True)
-        xt = torch.gather(xt, 1, st)
-
-        return JointInterpolantResult(
-            xt=xt, st=st, _x1=x1, _pad_token=self.pad_token, _mask_token=self.mask_token
-        )
+        raise NotImplementedError
 
 
 class AnyOrderMaskInsertionInterpolant(JointInterpolant):
     def __init__(
         self,
         insertion_schedule: Schedule,
+        unmask_schedule: Schedule,
         vocab_size: int,
         mask_token: int,
         pad_token: int,
         max_length: int,
     ):
-        super().__init__(
-            insertion_schedule, vocab_size, mask_token, pad_token, max_length
-        )
+        super().__init__(vocab_size, mask_token, pad_token, max_length)
+        self.insertion_schedule = insertion_schedule
+        self.unmask_schedule = unmask_schedule
 
-    def hitting_time(self, t: Tensor, x1: Tensor) -> HittingTime:
+    def hitting_time(self, t: Tensor, x1: Tensor) -> tuple[Tensor, Tensor]:
         """
         t1 is sampled from a uniform distribution over [0, 1]. when t1 < self.mask_schedule.at(t)
         t2 is sampled from a uniform distribution over [t1, 1]
         """
         B, L = x1.shape
         eps = 1e-6
-        t1 = eps + torch.rand((B, L), device=x1.device) * (
-            1 - eps
-        )  # address the issue of t1 = 0
-        t2 = t1 + torch.rand((B, L), device=x1.device) * (1 - t1)
-        return HittingTime(
-            insertion_time=t1,  # (B, L)
-            unmasking_time=t2,  # (B, L)
+
+        insert_time = self.insertion_schedule.sample((B, L), device=x1.device)
+        insert_time = eps + (1 - eps) * insert_time  # ensure t1 is not 0
+        unmask_time = self.unmask_schedule.sample_truncated(
+            insert_time, (B, L), device=x1.device
         )
+
+        return insert_time, unmask_time
 
     def elbo_weight(self, t: Tensor, x1: Tensor):
         """
@@ -232,7 +198,9 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
             t: [B] the time parameter
         """
         token_posterior = F.softmax(prediction.token_logits, dim=-1)  # (B, L, V)
-        unmask_rate = token_posterior / (1 - t).view(-1, 1, 1)
+        unmask_rate = token_posterior * self.unmask_schedule.rate_scale_factor(t).view(
+            -1, 1, 1
+        )
         length_rate = (
             prediction.expected_gaps
             * self.insertion_schedule.rate_scale_factor(t).view(-1, 1)
@@ -243,30 +211,68 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
             length_rate=length_rate,  # (B, L+1)
         )
 
+    def sample_interpolant(self, t: Tensor, x1: Tensor) -> JointInterpolantResult:
+        """
+        Shapes:
+            x1: [B, L]
+            t: [B]
+        Returns:
+            xt: [B, L]
+            st: [B, L] boolean mask of positions that corresponds to xt
+            xt_mask_indices: [B, L] boolean mask of positions that are masked at xt
+            x1_remained: [B, L] tokens that are not deleted, used for the training target
+            gap_counts: [B, L+1] the number of deleted tokens between xt slots
+        """
+        # sample the stopping time (B, L, 2)
+        insertion_time, unmasking_time = self.hitting_time(t, x1)
 
-class VanillaMDMInterpolant(JointInterpolant):
+        clean_tokens = x1.ne(self.pad_token)
+        deleted_tokens = clean_tokens & (t[:, None] < insertion_time)
+        masked_tokens = (
+            clean_tokens
+            & (t[:, None] >= insertion_time)
+            & (t[:, None] < unmasking_time)
+        )
+
+        xt = torch.where(
+            deleted_tokens,
+            self.pad_token,  # for deletion, change to pad token
+            torch.where(
+                masked_tokens,
+                self.mask_token,  # for masking, change to mask token
+                x1,
+            ),
+        )
+
+        st = xt.ne(self.pad_token).argsort(dim=1, descending=True)
+        xt = torch.gather(xt, 1, st)
+
+        return JointInterpolantResult(
+            xt=xt, st=st, _x1=x1, _pad_token=self.pad_token, _mask_token=self.mask_token
+        )
+
+
+class MDMInterpolant(JointInterpolant):
     def __init__(
         self,
-        mask_schedule: Schedule,
+        unmask_schedule: Schedule,
         vocab_size: int,
         mask_token: int,
         pad_token: int,
         max_length: int,
     ):
-        super().__init__(mask_schedule, vocab_size, mask_token, pad_token, max_length)
+        super().__init__(vocab_size, mask_token, pad_token, max_length)
+        self.unmask_schedule = unmask_schedule
 
     def hitting_time(self, t: Tensor, x1: Tensor) -> Tensor:
         """
-        t2 is sampled from a uniform distribution over [0, 1]
-        t1 is always 0
+        t1 is sampled from a uniform distribution over [0, 1]. when t1 < self.mask_schedule.at(t)
+        t2 is sampled from a uniform distribution over [t1, 1]
         """
         B, L = x1.shape
         eps = 1e-6
-        t2 = eps + torch.rand((B, L), device=x1.device) * (
-            1 - eps
-        )  # address the issue of t2 = 0
-        t1 = torch.zeros((B, L), device=x1.device)
-        return torch.stack([t1, t2], dim=2)
+        t = eps + torch.rand((B, L), device=x1.device) * (1 - eps)
+        return t
 
     def elbo_weight(self, t: Tensor, x1: Tensor):
         """
@@ -286,3 +292,27 @@ class VanillaMDMInterpolant(JointInterpolant):
         Return the actual rate for the sampling
         """
         raise NotImplementedError
+
+    def sample_interpolant(self, t: Tensor, x1: Tensor) -> JointInterpolantResult:
+        # sample the stopping time (B, L, 2)
+        eps = 1e-6
+        unmask_time = self.unmask_schedule.sample(
+            (x1.shape[0], x1.shape[1]), device=x1.device
+        )
+        unmask_time = unmask_time * (1 - eps) + eps
+
+        clean_tokens = x1.ne(self.pad_token)
+        masked_tokens = clean_tokens & (t[:, None] < unmask_time)
+
+        xt = torch.where(
+            masked_tokens,
+            self.mask_token,  # for masking, change to mask token
+            x1,
+        )
+
+        st = xt.ne(self.pad_token).argsort(dim=1, descending=True)
+        xt = torch.gather(xt, 1, st)
+
+        return JointInterpolantResult(
+            xt=xt, st=st, _x1=x1, _pad_token=self.pad_token, _mask_token=self.mask_token
+        )

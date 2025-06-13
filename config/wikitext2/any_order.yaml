@@ -1,3 +1,4 @@
+trainer: "any-order-flow"
 dataset: "wikitext2"
 model:
   hidden_size: 256
@@ -8,10 +9,12 @@ model:
 interpolant:
   type: "any-order"
   max_length: 512
-  mask_schedule:
+  insert_schedule:
     type: "geometric"
     min: 5
     max: 0.01
+  unmask_schedule:
+    type: "linear"
 training:
   batch_size: 32
   learning_rate: 0.0001

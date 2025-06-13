@@ -1,3 +1,4 @@
+trainer: "any-order-flow"
 dataset: "bracket"
 model:
   hidden_size: 256
@@ -11,10 +12,12 @@ interpolant:
   tokens: 4
   mask_token: 0
   pad_token: 3
-  mask_schedule:
+  insert_schedule:
     type: "geometric"
     min: 5
     max: 0.01
+  unmask_schedule:
+    type: "linear"
 training:
   batch_size: 32
   learning_rate: 0.0001

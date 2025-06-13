@@ -1,3 +1,5 @@
+# This file is currently unusable in the current version
+trainer: "semiautoregressive"
 dataset: "bracket"
 model:
   hidden_size: 256

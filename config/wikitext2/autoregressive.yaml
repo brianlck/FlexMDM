@@ -1,3 +1,4 @@
+trainer: "autoregressive"
 dataset: "wikitext2"
 model:
   hidden_size: 256
