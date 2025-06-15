@@ -11,6 +11,8 @@ def mse(x, y):
 
 # TODO: check if this formulation is correct
 def jump_kernel_elbo(x, y, eps=1e-6):
+    # x_safe: true length
+    # y_safe: predicted length
     x_safe = torch.clamp(x, min=eps)
     y_safe = torch.clamp(y, min=eps)
 

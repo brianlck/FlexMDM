@@ -62,6 +62,14 @@ def train(config: DictConfig):
 
     # Initialize trainer
     # TODO: add gradient clipping / learning rate scheduler
+    checkpoint_callback = ModelCheckpoint(
+        monitor="val_loss",
+        mode="min",
+        filename = "epoch-{epoch:02d}-val_loss-{val_loss:.4f}",
+        dirpath=config.training.checkpoint_dir,
+        every_n_epochs=config.training.save_every_n_epochs,
+    )
+
     trainer_kwargs = dict(
         max_epochs=config.training.num_epochs,
         accelerator="gpu",
@@ -83,7 +91,6 @@ def train(config: DictConfig):
 
     if wandb_logger is not None:
         trainer_kwargs["logger"] = wandb_logger
-
     trainer = pl.Trainer(**trainer_kwargs)
 
     # Train the model

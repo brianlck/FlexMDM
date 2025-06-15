@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mdm_test_run
 #SBATCH --account=kempner_sham_lab
-#SBATCH --partition=kempner_h100
+#SBATCH --partition=kempner
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=100GB
@@ -18,4 +18,4 @@ conda deactivate
 conda activate jay_vlmdm
 
 
-python train_MDM.py --mask_schedule_type linear --wandb
+python train_MDM.py --wandb
