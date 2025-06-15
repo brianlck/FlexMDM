@@ -11,13 +11,15 @@ class ModelPrediction:
     token_posterior: Tensor
     length_posterior: Optional[Tensor] = None
     expected_gaps: Optional[Tensor] = None
+    variable_length: bool = True
 
     def __post_init__(self):
-        assert self.length_posterior is not None or self.expected_gaps is not None
-        if self.expected_gaps is None:
-            _, L = self.length_posterior.shape
-            index = torch.arange(0, L, device=self.token_posterior.device).view(1, -1)
-            self.expected_gaps = (self.length_posterior * index).sum(dim=-1)
+        if self.variable_length:
+            assert self.length_posterior is not None or self.expected_gaps is not None
+            if self.expected_gaps is None:
+                _, L = self.length_posterior.shape
+                index = torch.arange(0, L, device=self.token_posterior.device).view(1, -1)
+                self.expected_gaps = (self.length_posterior * index).sum(dim=-1)
 
 
 @dataclass
@@ -210,15 +212,15 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
         Return the ELBO weight for the training, can be changed depends on the empirical results
         """
         eps = 1e-6
-        weight_unmask = self.insertion_schedule.rate_scale_factor(t)
+        weight_insert = self.insertion_schedule.rate_scale_factor(t)
+        weight_insert_expanded = weight_insert.unsqueeze(1).expand(
+            -1, x1.shape[1] + 1
+        )  # (B,L+1)
+        weight_unmask = 1.0 / (1 - t + eps)
         weight_unmask_expanded = weight_unmask.unsqueeze(1).expand(
             -1, x1.shape[1]
         )  # (B,L)
-        weight_delete = 1.0 / (1 - t + eps)
-        weight_delete_expanded = weight_delete.unsqueeze(1).expand(
-            -1, x1.shape[1] + 1
-        )  # (B,L+1)
-        return weight_unmask_expanded, weight_delete_expanded
+        return weight_unmask_expanded, weight_insert_expanded
 
     def to_actual_rate(
         self, xt: Tensor, prediction: ModelPrediction, t: Tensor
@@ -237,13 +239,13 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
 class VanillaMDMInterpolant(JointInterpolant):
     def __init__(
         self,
-        mask_schedule: Schedule,
         vocab_size: int,
         mask_token: int,
         pad_token: int,
         max_length: int,
     ):
-        super().__init__(mask_schedule, vocab_size, mask_token, pad_token, max_length)
+        from schedule import NoSchedule
+        super().__init__(NoSchedule(), vocab_size, mask_token, pad_token, max_length)
 
     def hitting_time(self, t: Tensor, x1: Tensor) -> Tensor:
         """
@@ -255,19 +257,40 @@ class VanillaMDMInterpolant(JointInterpolant):
         t2 = eps + torch.rand((B, L), device=x1.device) * (
             1 - eps
         )  # address the issue of t2 = 0
-        t1 = torch.zeros((B, L), device=x1.device)
-        return torch.stack([t1, t2], dim=2)
+        t1 = torch.zeros((B, L), device=x1.device) - eps
+        return t1, t2
 
     def elbo_weight(self, t: Tensor, x1: Tensor):
         """
         Return the ELBO weight for the training, can be changed depends on the empirical results
         there's no weight_delete for the vanilla MDM
         """
-        weight_unmask = self.mask_schedule.rate_scale_factor(t)
+        eps = 1e-6
+        weight_unmask = 1.0 / (1 - t + eps)
         weight_unmask_expanded = weight_unmask.unsqueeze(1).expand(
             -1, x1.shape[1]
         )  # (B,L)
         return weight_unmask_expanded
+
+
+    def sample_interpolant(self, t: Tensor, x1: Tensor) -> JointInterpolantResult:
+        """
+        override the sample_interpolant method to handle the MDM interpolant: we also mask the padding tokens
+        """
+        B, L = x1.shape
+        eps = 1e-6
+        _ , unmasking_time = self.hitting_time(t, x1)
+        # we also mask the padding tokens
+        t_expand = t.unsqueeze(1).expand_as(unmasking_time)
+        masked_tokens = (t_expand < unmasking_time)
+        xt = torch.where(masked_tokens, self.mask_token, x1)
+        st = torch.ones_like(xt)
+        gap_counts = torch.zeros_like(xt)
+        
+
+        return JointInterpolantResult(
+            xt=xt, st=st, _x1=x1, _pad_token=self.pad_token, _mask_token=self.mask_token, x1_remained=x1, gap_counts=gap_counts
+        )
 
     def to_actual_rate(
         self, xt: Tensor, prediction: ModelPrediction, t: Tensor
