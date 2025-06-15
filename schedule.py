@@ -42,6 +42,7 @@ class LinearSchedule(Schedule):
         return torch.ones_like(t, device=t.device)
 
 
+
 class GeometricSchedule(Schedule, nn.Module):
     def __init__(self, min_val: float, max_val: float):
         super().__init__()
@@ -62,3 +63,17 @@ class GeometricSchedule(Schedule, nn.Module):
             * max_val**t
             * (min_val.log() - max_val.log())
         )
+
+
+class NoSchedule(Schedule):
+    """
+    Ghost schedule for the vanilla MDM
+    """
+    def __init__(self):
+        pass
+    
+    def at(self, t: Tensor):
+        return torch.ones_like(t, device=t.device)
+
+    def derivative_at(self, t: Tensor):
+        return None

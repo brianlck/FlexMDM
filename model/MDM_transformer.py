@@ -7,7 +7,7 @@ from .transformer import (
     DDiTBlock,
     DDitFinalLayer
 )
-from interpolant import ReparametrizedRate
+from interpolant import ModelPrediction
 
 class DDiTNoLengthModel(torch.nn.Module):
     """
@@ -55,10 +55,9 @@ class DDiTNoLengthModel(torch.nn.Module):
                 x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
 
             per_token_posterior = self.output_layer(x[:, :-1], c)
-            # dummy length posterior (all mass on one length, if your code insists):
-            length_posterior = None  
 
-        return ReparametrizedRate(
-            per_token_posterior=per_token_posterior,
-            length_posterior=length_posterior
+        return ModelPrediction(
+            token_posterior=per_token_posterior,
+            length_posterior= None,
+            variable_length=False
         )

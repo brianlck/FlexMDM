@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 import wandb
 import torch.nn.functional as F
 from model.MDM_transformer import DDiTNoLengthModel
-from interpolant import vanilla_MDM_Interpolant, ReparametrizedRate
+from interpolant import VanillaMDMInterpolant, ModelPrediction
 from data.text import TEXT_DATASETS, setup_tokeniser, get_text_dataset
 from data.parenthesis import BracketDataset
 from schedule import GeometricSchedule, LinearSchedule
@@ -26,17 +26,8 @@ class MDM(pl.LightningModule):
         # Initialize model (no length head)
         self.model = DDiTNoLengthModel(config)
 
-        # Initialize Masking Schedule
-        if args.mask_schedule_type == "geometric":
-            mask_schedule = GeometricSchedule(min=5.0, max=0.01)
-        elif args.mask_schedule_type == "linear":
-            mask_schedule = LinearSchedule()
-        else:
-            raise ValueError(f"Invalid mask schedule type: {args.mask_schedule_type}")
-
         # Initialize interpolant
-        self.interpolant = vanilla_MDM_Interpolant(
-            mask_schedule=mask_schedule,
+        self.interpolant = VanillaMDMInterpolant(
             vocab_size=config.interpolant.tokens,
             mask_token=config.interpolant.mask_token,
             pad_token=config.interpolant.pad_token,
@@ -46,26 +37,23 @@ class MDM(pl.LightningModule):
         # Save hyperparameters
         self.save_hyperparameters()
 
-    def forward(self, x, t) -> ReparametrizedRate:
+    def forward(self, x, t) -> ModelPrediction:
         return self.model(x, t)
 
     def training_loss(self, x1, t):
-        # sample interpolant and elbo weight
-        xt, _ , xt_mask_indices, _, _ = self.interpolant.new_sample_interpolant(t, x1)
-        weight_unmask = self.interpolant.elbo_weight(t, x1)
+        batch_size = x1.shape[0]
+        interpolant_sample = self.interpolant.sample_interpolant(t, x1)
+        unmask_weight = self.interpolant.elbo_weight(t, x1)
+        prediction: ModelPrediction = self(interpolant_sample.xt, t)
 
-        # model prediction
-        pred_rate = self(xt, t)
-
-        # compute unmask loss
-        unmask_logits = pred_rate.per_token_posterior
-        if pred_rate.length_posterior is not None:
-            raise ValueError("Length posterior should be None for the vanilla MDM")
-        
-        # compute unmask loss
-        loss = F.cross_entropy(unmask_logits[xt_mask_indices] , x1[xt_mask_indices], reduction='none') * weight_unmask[xt_mask_indices]
-        loss = loss.sum() / (x1.shape[0] * self.config.interpolant.max_length)        
-        return loss
+        masked_indices = interpolant_sample.mask_indices
+        unmask_loss = unmask_weight[masked_indices] * F.cross_entropy(
+            prediction.token_posterior[masked_indices],
+            interpolant_sample.x1_remained[masked_indices],
+            reduction="none",
+        )
+        unmask_loss = unmask_loss.sum() / (batch_size * self.config.interpolant.max_length)
+        return unmask_loss
 
     def training_step(self, batch, batch_idx):
         # Extract input data
@@ -75,11 +63,11 @@ class MDM(pl.LightningModule):
         x1 = batch
         batch_size = x1.shape[0]
         t = torch.rand(batch_size, device=x1.device)
-        loss = self.training_loss(x1, t)
+        unmask_loss = self.training_loss(x1, t)
 
-        self.log("train/total_loss", loss, prog_bar=True)
+        self.log("train/total_loss", unmask_loss, prog_bar=True)
 
-        return loss
+        return unmask_loss
 
     def validation_step(self, batch, batch_idx):
         if isinstance(batch, dict):
@@ -128,7 +116,7 @@ def train(args):
         nonlocal wandb_logger
         if args.wandb:
             wandb.init(project="interpretable-flow", entity=args.wandb_entity, config=OmegaConf.to_container(config, resolve=True),
-                name= f"MDM_{args.mask_schedule_type}",
+                name= f"MDM-new-wikitext2-longer-epochs",
             )
             wandb_logger = WandbLogger(
                 project=wandb.run.project,
@@ -183,6 +171,14 @@ def train(args):
     # Initialize model
     model = MDM(config, args)
 
+    checkpoint_callback = ModelCheckpoint(
+        monitor="val_loss",
+        mode="min",
+        filename = "epoch-{epoch:02d}-val_loss-{val_loss:.4f}",
+        dirpath=config.training.checkpoint_dir,
+        every_n_epochs=config.training.save_every_n_epochs,
+    )
+
     # Initialize trainer
     # TODO: add gradient clipping / learning rate scheduler / gradient accumulation
     trainer_kwargs = dict(
@@ -190,8 +186,8 @@ def train(args):
         accelerator="gpu",
         devices=config.training.devices,
         log_every_n_steps=100,
-        gradient_clip_val = 1.0,
         enable_checkpointing=True,
+        callbacks=[checkpoint_callback]
     )
     if wandb_logger is not None:
         trainer_kwargs["logger"] = wandb_logger
@@ -207,7 +203,10 @@ def train(args):
     )
 
     if args.wandb:
-        wandb.finish()
+        @rank_zero_only
+        def _finish_wandb():
+            wandb.finish()
+        _finish_wandb()
 
 
 if __name__ == "__main__": 
@@ -218,7 +217,6 @@ if __name__ == "__main__":
         help="Path to config file",
         default="config/wikitext2/vanilla_MDM.yaml"
     )
-    parser.add_argument("--mask_schedule_type", type=str, help="which mask schedule to use: currently supports geometric and linear", default = "geometric")
     parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from")
     parser.add_argument("--wandb", action="store_true", help="whether to use wandb")
     parser.add_argument("--wandb_entity", type=str, help="wandb entity", default = "jaeyeon_kim-harvard-university")

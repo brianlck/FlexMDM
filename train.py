@@ -3,6 +3,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
+from pytorch_lightning.callbacks import ModelCheckpoint
 import os
 import argparse
 from omegaconf import OmegaConf
@@ -85,6 +86,13 @@ class TransdimensionalFlowModule(pl.LightningModule):
                 )
                 insertion_loss = insertion_loss.sum() / (batch_size * self.config.interpolant.max_length)
 
+                # sanity check for the almost zero prediction
+                zero_prediction = torch.zeros_like(prediction.expected_gaps) + 1e-4
+                zero_prediction_loss = insert_weight[not_pad_tokens] * jump_kernel_elbo(
+                    interpolant_sample.gap_counts[not_pad_tokens], zero_prediction[not_pad_tokens]
+                )
+                zero_prediction_loss = zero_prediction_loss.sum() / (batch_size * self.config.interpolant.max_length)
+
             case "distribution":
                 gap_one_hot = F.one_hot(
                     interpolant_sample.gaps,
@@ -95,7 +103,7 @@ class TransdimensionalFlowModule(pl.LightningModule):
                 )
                 insertion_loss = insertion_loss.mean()
 
-        return unmask_loss, insertion_loss
+        return unmask_loss, insertion_loss, zero_prediction_loss
 
     def training_step(self, batch, batch_idx):
         # Extract input data
@@ -106,7 +114,7 @@ class TransdimensionalFlowModule(pl.LightningModule):
         batch_size = x1.shape[0]
         t = torch.rand(batch_size, device=x1.device)
 
-        unmask_loss, len_loss = self.training_loss(x1, t)
+        unmask_loss, len_loss, zero_prediction_loss = self.training_loss(x1, t)
 
         if self.len_loss_scheduler:
             warmup_steps = self.config.training.warmup_steps
@@ -119,6 +127,7 @@ class TransdimensionalFlowModule(pl.LightningModule):
 
         self.log("train/unmask_loss", unmask_loss, prog_bar=True)
         self.log("train/len_loss", len_loss, prog_bar=True)
+        self.log("train/zero_prediction_loss", zero_prediction_loss, prog_bar=True)
         self.log("train/total_loss", loss, prog_bar=True)
 
         return loss
@@ -131,13 +140,14 @@ class TransdimensionalFlowModule(pl.LightningModule):
         batch_size = x1.shape[0]
 
         t = torch.rand(batch_size, device=x1.device)
-        unmask_loss, len_loss = self.training_loss(x1, t)
+        unmask_loss, len_loss, zero_prediction_loss = self.training_loss(x1, t)
 
         # no scheduler for validation
         loss = unmask_loss + len_loss
 
         self.log("val/unmask_loss", unmask_loss, prog_bar=True)
         self.log("val/len_loss", len_loss, prog_bar=True)
+        self.log("val/zero_prediction_loss", zero_prediction_loss, prog_bar=True)
         self.log("val_loss", loss, prog_bar=True)
 
         return loss
@@ -172,7 +182,7 @@ class TransdimensionalFlowModule(pl.LightningModule):
         interpolant_state = checkpoint["interpolant_state"]
 
         self.interpolant = AnyOrderMaskInsertionInterpolant(
-            insertion_schedule=GeometricSchedule(min=5.0, max=0.01),
+            insertion_schedule= LinearSchedule(),
             vocab_size=interpolant_state["vocab_size"],
             mask_token=interpolant_state["mask_token"],
             pad_token=interpolant_state["pad_token"],
@@ -192,7 +202,7 @@ def train(args):
         nonlocal wandb_logger
         if args.wandb:
             wandb.init(project="interpretable-flow", entity=args.wandb_entity, config=OmegaConf.to_container(config, resolve=True),
-                name=f"VLMDM_{args.insertion_schedule_type}_{args.len_loss_scheduler}",
+                name=f"VLMDM-new-wikitext2-longer-epochs",
             )
             wandb_logger = WandbLogger(
                 project=wandb.run.project,
@@ -253,15 +263,25 @@ def train(args):
 
     # Initialize trainer
     # TODO: add gradient clipping / learning rate scheduler
+    checkpoint_callback = ModelCheckpoint(
+        monitor="val_loss",
+        mode="min",
+        filename = "epoch-{epoch:02d}-val_loss-{val_loss:.4f}",
+        dirpath=config.training.checkpoint_dir,
+        every_n_epochs=config.training.save_every_n_epochs,
+    )
+
     trainer_kwargs = dict(
         max_epochs=config.training.num_epochs,
         accelerator="gpu",
         devices=config.training.devices,
         log_every_n_steps=100,
         enable_checkpointing=True,
+        callbacks=[checkpoint_callback]
     )
     if wandb_logger is not None:
         trainer_kwargs["logger"] = wandb_logger
+        
     trainer = pl.Trainer(**trainer_kwargs)
 
     # Train the model
