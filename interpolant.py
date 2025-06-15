@@ -307,6 +307,7 @@ class MDMInterpolant(JointInterpolant):
         )  # (B,L)
         return weight_unmask_expanded
 
+
     def to_actual_rate(
         self, xt: Tensor, prediction: ModelPrediction, t: Tensor
     ) -> Rate:
