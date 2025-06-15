@@ -78,6 +78,7 @@ class LinearSchedule(Schedule):
 
 
 
+
 class GeometricSchedule(Schedule, nn.Module):
     def __init__(self, min_val: float, max_val: float):
         super().__init__()

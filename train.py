@@ -91,6 +91,7 @@ def train(config: DictConfig):
 
     if wandb_logger is not None:
         trainer_kwargs["logger"] = wandb_logger
+        
     trainer = pl.Trainer(**trainer_kwargs)
 
     # Train the model
