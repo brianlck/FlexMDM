@@ -25,10 +25,10 @@ import matplotlib.pyplot as plt
 
 def model_load(model_name: str):
     if model_name == "vlmdm":
-        checkpoint_path = f"/n/netscratch/sham_lab/Lab/jaykim/ckpts_tdflow/ours/epoch-epoch=505-val_loss-val_loss=1.8743.ckpt"
+        checkpoint_path = f"/n/netscratch/sham_lab/Everyone/jay_brian/our_model/epoch-epoch=505-val_loss-val_loss=1.8743.ckpt"
         model = TransdimensionalFlowModule.load_from_checkpoint(checkpoint_path)
     elif model_name == "mdm":
-        checkpoint_path = f"/n/netscratch/sham_lab/Lab/jaykim/ckpts_tdflow/mdm/epoch-epoch=73-val_loss-val_loss=1.7349.ckpt"
+        checkpoint_path = f"/n/netscratch/sham_lab/Everyone/jay_brian/mdm/epoch-epoch=73-val_loss-val_loss=1.7349.ckpt"
         model = MDM.load_from_checkpoint(checkpoint_path)
     else:
         raise ValueError(f"Model {model_name} not found")
@@ -146,14 +146,14 @@ def calculate_mauve_score(text_samples: List[str], max_length: int, reference_da
 # Length statistics
 # ------------------------------------------------------------
 
-def length_stat_plot(metrics, data = "wikitext2"):
+def length_stat_plot(metrics, model_name = "mdm", data = "wikitext2"):
     plt.figure(figsize=(10, 5))
     plt.hist(metrics, bins = 50, edgecolor="steelblue", alpha=0.85)
     plt.xlabel("Sequence Length")
     plt.title(f"Length distribution of generated samples")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f"length_distribution_generated_samples.png")
+    plt.savefig(f"pngs/length_distribution_generated_samples_{model_name}_{data}.png")
     plt.close()
 
 
@@ -215,7 +215,7 @@ def main(args):
         pass
 
     if args.len_stats:
-        length_stat_plot(metrics, data = "wikitext2")
+        length_stat_plot(metrics, model_name = args.model, data = "wikitext2")
         
 
 if __name__ == "__main__":
