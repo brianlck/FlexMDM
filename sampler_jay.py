@@ -90,7 +90,8 @@ def mdm_style_sampling(
     mask: int,
     pad: int,
     batch_size: int,
-    max_length: int
+    max_length: int,
+    temperature: float = 1.0
 ):
 
     device = model.device
@@ -124,7 +125,7 @@ def mdm_style_sampling(
         rand = torch.rand_like(xt, dtype = torch.float32, device = device)
         unmasking_indices = mask_indices & (rand < unmasking_rate) # select with index to unmask
         b_ids, p_ids = torch.where(unmasking_indices)
-        logits_with_noise = add_gumbel_noise(pred_rate.token_posterior[b_ids, p_ids], mask) # add gumbel noise to the logits
+        logits_with_noise = add_gumbel_noise(pred_rate.token_posterior[b_ids, p_ids], mask, temperature) # add gumbel noise to the logits
         sampled_tokens = torch.argmax(logits_with_noise, dim = -1)
         xs_tmp[b_ids, p_ids] = sampled_tokens
 
@@ -176,7 +177,8 @@ def mdm_sampling(
     mask: int,
     pad: int,
     batch_size: int,
-    max_length: int):
+    max_length: int,
+    temperature: float = 1.0):
 
     device = model.device
     B = batch_size
@@ -204,15 +206,12 @@ def mdm_sampling(
         rand = torch.rand_like(xt, dtype = torch.float32, device = device)
         unmasking_indices = mask_indices & (rand < unmasking_rate) # select with index to unmask
         b_ids, p_ids = torch.where(unmasking_indices)
-        logits_with_noise = add_gumbel_noise(pred_rate.token_posterior[b_ids, p_ids], mask) # add gumbel noise to the logits
+        logits_with_noise = add_gumbel_noise(pred_rate.token_posterior[b_ids, p_ids], mask, temperature) # add gumbel noise to the logits
         sampled_tokens = torch.argmax(logits_with_noise, dim = -1)
         xs_tmp[b_ids, p_ids] = sampled_tokens
         xt = xs_tmp
         
         sampling_trace.append(decode_sequence_with_mask(extract_non_pad(xt, pad), tokeniser, pad, mask))
-        
-        if i % 100 == 0:
-            print(f"Generation step: {i}", f"seq_len: {len_trace[-1][1]}", f"clean_tokens: {len_trace[-1][2]}", f"step: {i}")
         
     return sampling_trace, len_trace
 
