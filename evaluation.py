@@ -10,11 +10,30 @@ from sampler_jay import mdm_sampling, mdm_style_sampling
 from data.text import setup_tokeniser, get_text_dataset, decode_sequence_with_mask, wt_detokeniser
 import mauve
 from typing import List
+from train import TransdimensionalFlowModule
+from train_MDM import MDM
+import matplotlib.pyplot as plt
 
 
 # ------------------------------------------------------------
 # Evaluation library for discrete diffusion models
 # ------------------------------------------------------------
+
+# ------------------------------------------------------------
+# Model loading
+# ------------------------------------------------------------
+
+def model_load(model_name: str):
+    if model_name == "vlmdm":
+        checkpoint_path = f"checkpoints/wikitext2/any_order/20250613-192826/epoch-epoch=505-val_loss-val_loss=1.8743.ckpt"
+        model = TransdimensionalFlowModule.load_from_checkpoint(checkpoint_path)
+    elif model_name == "mdm":
+        checkpoint_path = f"checkpoints/wikitext2/vanilla_MDM/20250613-192949/epoch-epoch=73-val_loss-val_loss=1.7349.ckpt"
+        model = MDM.load_from_checkpoint(checkpoint_path)
+    else:
+        raise ValueError(f"Model {model_name} not found")
+    print("Model loaded")
+    return model
 
 # ------------------------------------------------------------
 # Generative perplexity and entropy
@@ -88,9 +107,10 @@ def calculate_entropy(tokenized_tensor_batch, first_eos_batch):
 
 # ------------------------------------------------------------
 # MAUVE score
+# NOTE: MAUVE score has not been debugged yet
 # ------------------------------------------------------------
 
-def calculate_mauve_score(text_samples: List[str], max_length: int, reference_dataset: str = "wikitext2", num_reference: int = 500) -> float:
+def calculate_mauve_score(text_samples: List[str], max_length: int, reference_dataset: str = "wikitext2", num_reference: int = 2) -> float:
     # load true (reference) dataset
     dataset = get_text_dataset(
         name = reference_dataset,
@@ -122,6 +142,20 @@ def calculate_mauve_score(text_samples: List[str], max_length: int, reference_da
 
     return mauve_result.mauve
 
+# ------------------------------------------------------------
+# Length statistics
+# ------------------------------------------------------------
+
+def length_stat_plot(metrics, data = "wikitext2"):
+    plt.figure(figsize=(10, 5))
+    plt.hist(metrics, bins = 50, edgecolor="steelblue", alpha=0.85)
+    plt.xlabel("Sequence Length")
+    plt.title(f"Length distribution of generated samples")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"length_distribution_generated_samples.png")
+    plt.close()
+
 
 # ------------------------------------------------------------
 # main function
@@ -129,42 +163,60 @@ def calculate_mauve_score(text_samples: List[str], max_length: int, reference_da
 
 def main(args):
     model = model_load(args.model)
+    print("Evaluation started for model: ", args.model)
     tokeniser = setup_tokeniser()
+    processing_size = 16
+    num_batches = math.ceil(args.num_samples / processing_size)
+    metrics = []
 
-    # sample: sampling_trace[-1] is the tokenized text samples
-    if args.model == "vlmdm":
-        sampling_trace, len_trace = mdm_style_sampling(model, 
-        num_steps = args.num_steps,
-        tokeniser = tokeniser,
-        mask = tokeniser.mask_token_id,
-        pad = tokeniser.pad_token_id,
-            batch_size = args.batch_size,
-            max_length = args.max_length)
-    else:
-        sampling_trace, len_trace = mdm_sampling(model, 
+    for b_idx in range(num_batches):
+        # --- draw one batch of samples ---
+        if args.model == "vlmdm":
+            sampling_trace, len_trace = mdm_style_sampling(model, 
             num_steps = args.num_steps,
             tokeniser = tokeniser,
             mask = tokeniser.mask_token_id,
             pad = tokeniser.pad_token_id,
-            batch_size = args.batch_size,
-            max_length = args.max_length)
+                batch_size = processing_size,
+                max_length = args.max_length,
+                temperature = args.temperature)
+        else:
+            sampling_trace, len_trace = mdm_sampling(model, 
+                num_steps = args.num_steps,
+                tokeniser = tokeniser,
+                mask = tokeniser.mask_token_id,
+                pad = tokeniser.pad_token_id,
+                batch_size = processing_size,
+                max_length = args.max_length,
+                temperature = args.temperature)
 
-    # genppl
+        # --- compute metrics ---
+        if args.mauve:
+            # TODO: fill in the code for MAUVE score
+            pass
+
+        if args.genppl:
+            sample = sampling_trace[-1]
+            likelihood, entropy = eval_gen_ppl(sample, args.max_length)
+            print(f"{b_idx}th batch: Likelihood: {likelihood}, Entropy: {entropy}")
+            metrics.append({"likelihood": likelihood, "entropy": entropy})
+
+        if args.len_stats:
+            lengths = len_trace[-1][1].tolist()
+            print(f"{b_idx}th batch: Lengths: {lengths}")
+            metrics.extend(lengths)
+    
     if args.genppl:
-        sample = sampling_trace[-1]
-        likelihood, entropy = eval_gen_ppl(sample, args.max_length)
-        print(f"Likelihood: {likelihood}, Entropy: {entropy}")
-        print(f"sample: {sample}")
-
-    # length statistics
-    if args.length_statistics:
-        lengths_tensor = len_trace[-1][1]
-        print(f"Lengths: {lengths_tensor}")
-
-    # MAUVE score
+        print(f"Average likelihood: {sum([m['likelihood'] for m in metrics]) / len(metrics)}")
+        print(f"Average entropy: {sum([m['entropy'] for m in metrics]) / len(metrics)}")
+    
     if args.mauve:
-        mauve_score = calculate_mauve_score(sampling_trace, args.max_length)
-        print(f"MAUVE score: {mauve_score:.4f}")
+        # TODO: implement the code for MAUVE score
+        pass
+
+    if args.len_stats:
+        length_stat_plot(metrics, data = "wikitext2")
+        
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -172,10 +224,11 @@ if __name__ == "__main__":
     # metrics
     parser.add_argument("--mauve", action="store_true")
     parser.add_argument("--genppl", action="store_true")
-    parser.add_argument("--length_statistics", action="store_true")
+    parser.add_argument("--len_stats", action="store_true")
     # sampler parameters
     parser.add_argument("--num_steps", type=int, default=1024)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--num_samples", type=int, default=32, help="need to be the multiple of 16")
     parser.add_argument("--max_length", type=int, default=512)
+    parser.add_argument("--temperature", type=float, default=1.0, help="temperature for categorical sampling")
     args = parser.parse_args()
     main(args)
