@@ -160,9 +160,6 @@ def mdm_style_sampling(
 
         sampling_trace.append(decode_sequence_with_mask(extract_non_pad(xt, pad), tokeniser, pad, mask))
 
-        if i % 100 == 0:
-            print(f"Generation step: {i}", f"seq_len: {len_trace[-1][1]}", f"clean_tokens: {len_trace[-1][2]}")
-
     return sampling_trace, len_trace
 
 # ------------------------------------------------------------
