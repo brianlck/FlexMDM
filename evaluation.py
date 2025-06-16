@@ -25,10 +25,10 @@ import matplotlib.pyplot as plt
 
 def model_load(model_name: str):
     if model_name == "vlmdm":
-        checkpoint_path = f"checkpoints/wikitext2/any_order/20250613-192826/epoch-epoch=505-val_loss-val_loss=1.8743.ckpt"
+        checkpoint_path = f"/n/netscratch/sham_lab/Lab/jaykim/ckpts_tdflow/ours/epoch-epoch=505-val_loss-val_loss=1.8743.ckpt"
         model = TransdimensionalFlowModule.load_from_checkpoint(checkpoint_path)
     elif model_name == "mdm":
-        checkpoint_path = f"checkpoints/wikitext2/vanilla_MDM/20250613-192949/epoch-epoch=73-val_loss-val_loss=1.7349.ckpt"
+        checkpoint_path = f"/n/netscratch/sham_lab/Lab/jaykim/ckpts_tdflow/mdm/epoch-epoch=73-val_loss-val_loss=1.7349.ckpt"
         model = MDM.load_from_checkpoint(checkpoint_path)
     else:
         raise ValueError(f"Model {model_name} not found")
