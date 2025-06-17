@@ -104,7 +104,7 @@ def mdm_style_sampling(
 
     # intialize all-pad sequencne and trace
     xt = torch.full((B, L), pad, dtype=torch.int64, device=device)
-    xt[:, 0:3] = mask # all-pad sentence does not lead to meaningful output
+    # xt[:, 0:3] = mask # all-pad sentence does not lead to meaningful output
     sampling_trace = [xt]
     len_trace = []
 
