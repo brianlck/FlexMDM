@@ -227,7 +227,7 @@ if __name__ == "__main__":
     parser.add_argument("--len_stats", action="store_true")
     # sampler parameters
     parser.add_argument("--num_steps", type=int, default=1024)
-    parser.add_argument("--num_samples", type=int, default=32, help="need to be the multiple of 16")
+    parser.add_argument("--num_samples", type=int, default=1024, help="need to be the multiple of 16")
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=1.0, help="temperature for categorical sampling")
     args = parser.parse_args()
