@@ -301,11 +301,8 @@ class MDMInterpolant(JointInterpolant):
         )
         unmask_time = unmask_time * (1 - eps) + eps
 
-        clean_tokens = x1.ne(self.pad_token)
-        masked_tokens = clean_tokens & (t[:, None] < unmask_time)
-
         xt = torch.where(
-            masked_tokens,
+            t[:, None] < unmask_time,
             self.mask_token,  # for masking, change to mask token
             x1,
         )

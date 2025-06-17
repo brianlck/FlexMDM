@@ -56,6 +56,10 @@ def train(config: DictConfig):
         case _:
             raise NotImplementedError(f"Trainer {config.trainer} is not supported")
 
+    if config.training.warmup_steps is None:
+        total_iters = config.training.num_epochs * len(dataset_bundle.train_loader)
+        config.training.warmup_steps = int(total_iters * 0.01)
+
     # Initialize trainer
     # TODO: add gradient clipping / learning rate scheduler
     trainer_kwargs = dict(

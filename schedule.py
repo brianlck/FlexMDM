@@ -84,6 +84,8 @@ class GeometricSchedule(Schedule, nn.Module):
         self.max = nn.Parameter(Tensor([max]).cuda(), requires_grad=False)
 
     def at(self, t: Tensor):
+        self.min.device = t.device
+        self.max.device = t.device
         return torch.exp(-(self.min ** (1 - t)) * self.max**t)
 
     def derivative_at(self, t):
