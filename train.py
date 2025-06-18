@@ -36,7 +36,6 @@ def train(config: DictConfig):
         wandb_logger = None
 
     time_string = datetime.now().strftime("%Y%m%d-%H%M%S")
-
     config.training.checkpoint_dir = os.path.join(
         config.training.checkpoint_dir, time_string
     )
@@ -65,7 +64,7 @@ def train(config: DictConfig):
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",
         mode="min",
-        filename = "epoch-{epoch:02d}-val_loss-{val_loss:.4f}",
+        filename="epoch-{epoch:02d}-val_loss-{val_loss:.4f}",
         dirpath=config.training.checkpoint_dir,
         every_n_epochs=config.training.save_every_n_epochs,
     )
@@ -91,7 +90,7 @@ def train(config: DictConfig):
 
     if wandb_logger is not None:
         trainer_kwargs["logger"] = wandb_logger
-        
+
     trainer = pl.Trainer(**trainer_kwargs)
 
     # Train the model

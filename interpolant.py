@@ -227,7 +227,6 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
         """
         # sample the stopping time (B, L) / (B, L)
         insertion_time, unmasking_time = self.hitting_time(t, x1)
-        t_expand = t.unsqueeze(1).expand_as(insertion_time)
 
         clean_tokens = x1.ne(self.pad_token)
         deleted_tokens = clean_tokens & (t[:, None] < insertion_time)
@@ -248,7 +247,7 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
         )
 
         st = values.ne(self.pad_token)
-        keep_idx = st.argsort(dim = 1, descending = True)
+        keep_idx = st.argsort(dim=1, descending=True)
         xt = torch.gather(values, 1, keep_idx)
 
         # output remained_x1
@@ -257,10 +256,10 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
 
         # gap counts
         B, L = x1.shape
-        pos = torch.arange(L , device = x1.device)
+        pos = torch.arange(L, device=x1.device)
         sentinel = L
         st_idx = torch.where(st, pos, sentinel)
-        sorted_st , _ = torch.sort(st_idx, dim=1)
+        sorted_st, _ = torch.sort(st_idx, dim=1)
         x1_len = (x1 != self.pad_token).sum(dim=1)
         sorted_clamped = torch.minimum(sorted_st, x1_len.unsqueeze(1))
         pad_front = x1.new_zeros((B, 1)) - 1
@@ -270,7 +269,13 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
         gap_counts = gap_counts.clamp(min=0)
 
         return JointInterpolantResult(
-            xt=xt, st=st, _x1=x1, _pad_token=self.pad_token, _mask_token=self.mask_token, x1_remained=x1_remained, gap_counts = gap_counts 
+            xt=xt,
+            st=st,
+            _x1=x1,
+            _pad_token=self.pad_token,
+            _mask_token=self.mask_token,
+            x1_remained=x1_remained,
+            gap_counts=gap_counts,
         )
 
 
@@ -293,7 +298,7 @@ class MDMInterpolant(JointInterpolant):
         """
         B, L = x1.shape
         eps = 1e-6
-        t = eps + torch.rand((B, L), device=x1.device) * (1 - eps)
+        t = eps + self.unmask_schedule.sample((B, L), device=x1.device) * (1 - eps)
         return t
 
     def elbo_weight(self, t: Tensor, x1: Tensor):
@@ -306,7 +311,6 @@ class MDMInterpolant(JointInterpolant):
             -1, x1.shape[1]
         )  # (B,L)
         return weight_unmask_expanded
-
 
     def to_actual_rate(
         self, xt: Tensor, prediction: ModelPrediction, t: Tensor
