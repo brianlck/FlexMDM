@@ -1,7 +1,18 @@
 import abc
+from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 from torch import Tensor
+
+
+def get_schedule_from_config(config: DictConfig):
+    match config.type:
+        case "geometric":
+            return GeometricSchedule(min=config.min, max=config.max)
+        case "linear":
+            return LinearSchedule()
+        case _:
+            raise ValueError(f"Invalid schedule type: {config.type}")
 
 
 class Schedule(abc.ABC):
@@ -30,6 +41,27 @@ class Schedule(abc.ABC):
         """
         return self.derivative_at(t) / (1 - self.at(t))
 
+    def sample(self, shape, device):
+        """
+        Sample from the schedule, returns a tensor of shape `shape` with values in [0, 1]
+        """
+        uniform = torch.rand(shape, device=device)
+        return self.inv(uniform)
+
+    def sample_truncated(self, threshold, shape, device):
+        """
+        Sample from a truncated schedule, returns a tensor of shape `shape` with values in [threshold, 1]
+        """
+        uniform = torch.rand(shape, device=device)
+        return self.inv(uniform * (1 - threshold) + threshold)
+
+    @abc.abstractmethod
+    def inv(self, alpha: Tensor):
+        """
+        Given alpha in [0, 1] such that a(t)=alpha, returns the corresponding t.
+        """
+        raise NotImplementedError
+
 
 class LinearSchedule(Schedule):
     def __init__(self):
@@ -41,6 +73,8 @@ class LinearSchedule(Schedule):
     def derivative_at(self, t: Tensor):
         return torch.ones_like(t, device=t.device)
 
+    def inv(self, alpha: Tensor):
+        return alpha
 
 
 class GeometricSchedule(Schedule, nn.Module):
@@ -64,16 +98,7 @@ class GeometricSchedule(Schedule, nn.Module):
             * (min_val.log() - max_val.log())
         )
 
-
-class NoSchedule(Schedule):
-    """
-    Ghost schedule for the vanilla MDM
-    """
-    def __init__(self):
-        pass
-    
-    def at(self, t: Tensor):
-        return torch.ones_like(t, device=t.device)
-
-    def derivative_at(self, t: Tensor):
-        return None
+    def inv(self, alpha: Tensor):
+        log_min = self.min.log()
+        log_max = self.max.log()
+        return (torch.log(-torch.log(alpha)) - log_min) / (log_max - log_min)

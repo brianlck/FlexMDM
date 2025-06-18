@@ -1,3 +1,4 @@
+trainer: "any-order-flow"
 dataset: "bracket"
 model:
   hidden_size: 256
@@ -11,14 +12,24 @@ interpolant:
   tokens: 4
   mask_token: 0
   pad_token: 3
-  mask_schedule:
+  insert_schedule:
+    type: "geometric"
     min: 5
     max: 0.01
+  unmask_schedule:
+    type: "linear"
 training:
   batch_size: 32
   learning_rate: 0.0001
   devices: 1
-  num_epochs: 100
-  checkpoint_dir: "checkpoints/bracket/any-order"
-  save_top_k: 3
-  save_every_n_epochs: 5
+  num_epochs: 50
+  checkpoint_dir: "checkpoints/bracket"
+  save_top_k: 1
+  save_every_n_epochs: 1
+  loss_fn:
+    unmask: "elbo"
+    insert: "expectation"
+wandb:
+  entity: "jaeyeon_kim-harvard-university"
+  project: "interpretable-flow"
+  name: "wikitext2-any-order"

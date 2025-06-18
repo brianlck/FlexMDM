@@ -1,220 +1,41 @@
 import torch
-from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.utilities import rank_zero_only
 from pytorch_lightning.callbacks import ModelCheckpoint
 import os
-import argparse
-from omegaconf import OmegaConf
-import wandb
-import torch.nn.functional as F
-from model.transformer import AnyOrderMaskInsertionFlow
-from interpolant import AnyOrderMaskInsertionInterpolant, ModelPrediction
-from data.text import TEXT_DATASETS, setup_tokeniser, get_text_dataset
-from data.parenthesis import BracketDataset
-from bregman import jump_kernel_elbo, mse
-from schedule import GeometricSchedule, LinearSchedule
+import hydra
+from omegaconf import DictConfig, OmegaConf
 from datetime import datetime
+import wandb
+import data
+from lightning_modules import (
+    MaskedDiffusionModule,
+    AutoregressiveModule,
+    AnyOrderInsertionFlowModule,
+)
 
 
-class TransdimensionalFlowModule(pl.LightningModule):
-    def __init__(self, config, args):
-        super().__init__()
-        self.config = config
-        self.model_type = config.interpolant.type
-        self.learning_rate = config.training.learning_rate
-        self.unmask_loss_type = args.unmask_loss_type
-        self.len_predict_type = args.len_predict_type
-        self.len_loss_scheduler = args.len_loss_scheduler
-
-        # Initialize model based on type
-        self.model = AnyOrderMaskInsertionFlow(config, self.len_predict_type)
-
-        # Initialize Masking Schedule
-        if args.insertion_schedule_type == "geometric":
-            insertion_schedule = GeometricSchedule(min_val=5.0, max_val=0.01)
-        elif args.insertion_schedule_type == "linear":
-            insertion_schedule = LinearSchedule()
-        else:
-            raise ValueError(f"Invalid mask schedule type: {args.insertion_schedule_type}")
-
-        # Initialize interpolant
-        self.interpolant = AnyOrderMaskInsertionInterpolant(
-            insertion_schedule = insertion_schedule,
-            vocab_size=config.interpolant.tokens,
-            mask_token=config.interpolant.mask_token,
-            pad_token=config.interpolant.pad_token,
-            max_length=config.interpolant.max_length,
-        )
-
-        # Save hyperparameters
-        self.save_hyperparameters()
-
-    def forward(self, x, t) -> ModelPrediction:
-        return self.model(x, t)
-
-    def training_loss(self, x1, t):
-        batch_size = x1.shape[0]
-        interpolant_sample = self.interpolant.sample_interpolant(t, x1)
-        unmask_weight, insert_weight = self.interpolant.elbo_weight(t, x1)
-
-        prediction: ModelPrediction = self(interpolant_sample.xt, t)
-
-        match self.unmask_loss_type:
-            case "elbo":
-                mask_indices = interpolant_sample.mask_indices
-                unmask_loss = unmask_weight[mask_indices] * F.cross_entropy(
-                    prediction.token_posterior[mask_indices],
-                    interpolant_sample.x1_remained[mask_indices],
-                    reduction="none",
-                )
-                unmask_loss = unmask_loss.sum() / (batch_size * self.config.interpolant.max_length)
-
-            case _:
-                raise ValueError(f"Invalid unmask loss type: {self.unmask_loss_type}")
-
-        match self.len_predict_type:
-            case "expectation":
-                # boolean tensor of clean (including masked) tokens
-                not_pad_tokens = (interpolant_sample.xt != self.config.interpolant.pad_token) # B X L
-                left_pad_tensor = torch.ones((batch_size, 1), dtype = torch.bool, device = interpolant_sample.xt.device)
-                not_pad_tokens = torch.cat([left_pad_tensor, not_pad_tokens], dim = 1) # B X (L+1)
-
-                insertion_loss = insert_weight[not_pad_tokens] * jump_kernel_elbo(
-                    interpolant_sample.gap_counts[not_pad_tokens], prediction.expected_gaps[not_pad_tokens] 
-                )
-                insertion_loss = insertion_loss.sum() / (batch_size * self.config.interpolant.max_length)
-
-                # sanity check for the almost zero prediction
-                zero_prediction = torch.zeros_like(prediction.expected_gaps) + 1e-4
-                zero_prediction_loss = insert_weight[not_pad_tokens] * jump_kernel_elbo(
-                    interpolant_sample.gap_counts[not_pad_tokens], zero_prediction[not_pad_tokens]
-                )
-                zero_prediction_loss = zero_prediction_loss.sum() / (batch_size * self.config.interpolant.max_length)
-
-            case "distribution":
-                gap_one_hot = F.one_hot(
-                    interpolant_sample.gaps,
-                    num_classes=self.config.interpolant.max_length + 1,
-                ).to(prediction.length_posterior.dtype)
-                insertion_loss = insert_weight * mse(
-                    prediction.length_posterior, gap_one_hot
-                )
-                insertion_loss = insertion_loss.mean()
-
-        return unmask_loss, insertion_loss, zero_prediction_loss
-
-    def training_step(self, batch, batch_idx):
-        # Extract input data
-        if isinstance(batch, dict):
-            batch = batch["input_ids"]
-
-        x1 = batch
-        batch_size = x1.shape[0]
-        t = torch.rand(batch_size, device=x1.device)
-
-        unmask_loss, len_loss, zero_prediction_loss = self.training_loss(x1, t)
-
-        if self.len_loss_scheduler:
-            warmup_steps = self.config.training.warmup_steps
-            alpha = float(self.global_step) / float(warmup_steps)
-            alpha = max(0.0, min(1.0, alpha))
-        else:
-            alpha = 1.0
-        
-        loss = unmask_loss + alpha * len_loss
-
-        self.log("train/unmask_loss", unmask_loss, prog_bar=True)
-        self.log("train/len_loss", len_loss, prog_bar=True)
-        self.log("train/zero_prediction_loss", zero_prediction_loss, prog_bar=True)
-        self.log("train/total_loss", loss, prog_bar=True)
-
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        if isinstance(batch, dict):
-            batch = batch["input_ids"]
-
-        x1 = batch
-        batch_size = x1.shape[0]
-
-        t = torch.rand(batch_size, device=x1.device)
-        unmask_loss, len_loss, zero_prediction_loss = self.training_loss(x1, t)
-
-        # no scheduler for validation
-        loss = unmask_loss + len_loss
-
-        self.log("val/unmask_loss", unmask_loss, prog_bar=True)
-        self.log("val/len_loss", len_loss, prog_bar=True)
-        self.log("val/zero_prediction_loss", zero_prediction_loss, prog_bar=True)
-        self.log("val_loss", loss, prog_bar=True)
-
-        return loss
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
-        warmup_steps = self.config.training.warmup_steps
-        scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor = 0.01, end_factor = 1.0, total_iters = warmup_steps
-        )
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",
-                "frequency": 1,
-            },
-        }
-
-    def on_save_checkpoint(self, checkpoint):
-        checkpoint["config"] = self.config
-        checkpoint["interpolant_state"] = {
-            "vocab_size": self.interpolant.vocab_size,
-            "mask_token": self.interpolant.mask_token,
-            "pad_token": self.interpolant.pad_token,
-            "max_length": self.interpolant.max_length,
-        }
-
-    def on_load_checkpoint(self, checkpoint):
-        # TODO: work with general mask schedule
-        self.config = checkpoint["config"]
-        interpolant_state = checkpoint["interpolant_state"]
-
-        self.interpolant = AnyOrderMaskInsertionInterpolant(
-            insertion_schedule= LinearSchedule(),
-            vocab_size=interpolant_state["vocab_size"],
-            mask_token=interpolant_state["mask_token"],
-            pad_token=interpolant_state["pad_token"],
-            max_length=interpolant_state["max_length"],
-        )
-
-
-def train(args):
+def train(config: DictConfig):
     # set the random seed
     pl.seed_everything(42)
-    # Load config
-    config = OmegaConf.load(args.config)
-    wandb_logger = None
-    
-    @rank_zero_only
-    def _init_wandb():
-        nonlocal wandb_logger
-        if args.wandb:
-            wandb.init(project="interpretable-flow", entity=args.wandb_entity, config=OmegaConf.to_container(config, resolve=True),
-                name=f"VLMDM-new-wikitext2-longer-epochs",
-            )
-            wandb_logger = WandbLogger(
-                project=wandb.run.project,
-                name=wandb.run.name,
-                log_model=True,
-            )
-        else:
-            wandb_logger = None
+    torch.manual_seed(42)
+
+    if "wandb" in config:
+        wandb.init(
+            project="interpretable-flow",
+            entity=config.wandb.entity,
+            config=OmegaConf.to_container(config, resolve=True),
+            name=config.wandb.name,
+        )
+        wandb_logger = WandbLogger(
+            project=wandb.run.project,
+            name=wandb.run.name,
+            log_model=True,
+        )
+    else:
+        wandb_logger = None
 
     time_string = datetime.now().strftime("%Y%m%d-%H%M%S")
-    _init_wandb()
-
     config.training.checkpoint_dir = os.path.join(
         config.training.checkpoint_dir, time_string
     )
@@ -222,51 +43,28 @@ def train(args):
     # Create checkpoint directory
     os.makedirs(config.training.checkpoint_dir, exist_ok=True)
 
-    # Initialize dataset and dataloader
-    if config.dataset in TEXT_DATASETS:
-        tokeniser = setup_tokeniser()
-        train_set = get_text_dataset(
-            config.dataset, split="train", max_length=config.interpolant.max_length
-        )
-        val_set = get_text_dataset(
-            config.dataset, split="validation", max_length=config.interpolant.max_length
-        )
-        train_loader = DataLoader(
-            train_set, batch_size=config.training.batch_size, shuffle=True
-        )
-        val_loader = DataLoader(
-            val_set, batch_size=config.training.batch_size, shuffle=False
-        )
-        config.interpolant.tokens = len(tokeniser)
-        config.interpolant.pad_token = tokeniser.pad_token_id
-        config.interpolant.mask_token = tokeniser.mask_token_id
+    dataset_bundle = data.setup_data_and_update_config(config)
 
-    if config.dataset in ["bracket"]:
-        train_loader = DataLoader(
-            BracketDataset(10000, {4: 0.1, 16: 0.4, 32: 0.4, 64: 0.1}),
-            batch_size=config.training.batch_size,
-            shuffle=True,
-        )
-        val_loader = DataLoader(
-            BracketDataset(300, {4: 0.1, 16: 0.4, 32: 0.4, 64: 0.1}),
-            batch_size=config.training.batch_size,
-            shuffle=False,
-        )
+    match config.trainer:
+        case "mdm":
+            module = MaskedDiffusionModule(config)
+        case "autoregressive":
+            module = AutoregressiveModule(config)
+        case "any-order-flow":
+            module = AnyOrderInsertionFlowModule(config)
+        case _:
+            raise NotImplementedError(f"Trainer {config.trainer} is not supported")
 
-    # calculate max steps
-    print(len(train_loader))
-    total_iters = config.training.num_epochs * len(train_loader)
-    config.training.warmup_steps = int(total_iters * 0.01)
-    
-    # Initialize model
-    model = TransdimensionalFlowModule(config, args)
+    if config.training.warmup_steps is None:
+        total_iters = config.training.num_epochs * len(dataset_bundle.train_loader)
+        config.training.warmup_steps = int(total_iters * 0.01)
 
     # Initialize trainer
     # TODO: add gradient clipping / learning rate scheduler
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",
         mode="min",
-        filename = "epoch-{epoch:02d}-val_loss-{val_loss:.4f}",
+        filename="epoch-{epoch:02d}-val_loss-{val_loss:.4f}",
         dirpath=config.training.checkpoint_dir,
         every_n_epochs=config.training.save_every_n_epochs,
     )
@@ -277,64 +75,44 @@ def train(args):
         devices=config.training.devices,
         log_every_n_steps=100,
         enable_checkpointing=True,
-        callbacks=[checkpoint_callback]
+        default_root_dir="checkpoints",
     )
+
+    # Add ModelCheckpoint callback to save the checkpoint when validation loss is at a new low
+    checkpoint_callback = ModelCheckpoint(
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+        filename="best-val-loss-{epoch:02d}-{val_loss:.2f}",
+    )
+
+    trainer_kwargs["callbacks"] = [checkpoint_callback]
+
     if wandb_logger is not None:
         trainer_kwargs["logger"] = wandb_logger
-        
+
     trainer = pl.Trainer(**trainer_kwargs)
 
     # Train the model
+    ckpt_path = None
+    if "resume_path" in config.training:
+        ckpt_path = config.training.resume_path
+
     trainer.fit(
-        model,
-        train_dataloaders=train_loader,
-        val_dataloaders=val_loader,
-        ckpt_path=args.resume,
+        module,
+        train_dataloaders=dataset_bundle.train_loader,
+        val_dataloaders=dataset_bundle.val_loader,
+        ckpt_path=ckpt_path,
     )
 
-    if args.wandb:
-        @rank_zero_only
-        def _finish_wandb():
-            wandb.finish()
-        _finish_wandb()
+    if "wandb" in config:
+        wandb.finish()
+
+
+@hydra.main(config_path=".", config_name="config")
+def main(cfg: DictConfig):
+    train(cfg)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config",
-        type=str,
-        help="Path to config file",
-        default="config/wikitext2/any_order.yaml",
-    )
-    parser.add_argument(
-        "--interpolant_type",
-        type=str,
-        help="which interpolant to use: currently just supports any-order",
-        default="any-order",
-    )
-    parser.add_argument(
-        "--insertion_schedule_type",
-        type=str,
-        help="which insertion schedule to use: currently supports geometric and linear",
-        default="linear",
-    )
-    parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from")
-    parser.add_argument(
-        "--unmask_loss_type",
-        type=str,
-        help="which unmask loss to use: cross entropy or mse",
-        default="elbo",
-    )
-    parser.add_argument(
-        "--len_predict_type",
-        type=str,
-        help="which length prediction to use: distribution (p(s_t | x_t, t)) or expectation (E[s_t | x_t, t])",
-        default="expectation",
-    )
-    parser.add_argument("--wandb", action="store_true", help="whether to use wandb")
-    parser.add_argument("--len_loss_scheduler", action = "store_true", help = "whether to use len loss scheduler")
-    parser.add_argument("--wandb_entity", type=str, help="wandb entity", default = "jaeyeon_kim-harvard-university")
-
-    args = parser.parse_args()
-    train(args)
+    main()

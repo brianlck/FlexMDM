@@ -2,7 +2,7 @@
 # TODO: This code is quite bad, we'd like to refactor, can we use ein / einops?
 import torch
 from dataclasses import dataclass
-from interpolant import SemiAutoregressiveInterpolant, AnyOrderMaskInsertionInterpolant
+from interpolant import AnyOrderMaskInsertionInterpolant
 from typing import Any, Literal, Optional
 
 
@@ -36,102 +36,6 @@ def _sample_tokens(probs: torch.Tensor) -> torch.Tensor:
     flat_probs = probs.view(-1, vocab_size)
     samples = torch.multinomial(flat_probs, num_samples=1)
     return samples.view(batch_size, seq_len)
-
-
-def semiauto_euler_sampling(
-    model: torch.nn.Module,
-    interpolant: SemiAutoregressiveInterpolant,
-    steps: int,
-    mask: int,
-    pad: int,
-    batch_size: int,
-    max_length: int,
-    return_trace: bool = False,
-) -> SamplingResult:
-    device = model.device
-    xt = pad * torch.ones((batch_size, max_length), device=device).to(torch.int64)
-    sampling_trace = [[] for _ in range(batch_size)] if return_trace else None
-
-    dt = 1.0 / steps
-    t = torch.zeros((batch_size,), device=device)
-    for i in range(steps):
-        print(f"step {i}")
-        t = t + dt
-        pred_rate = model(xt, t)
-        pred_rate = interpolant.to_actual_rate(xt, pred_rate, t)
-        unmask_rate = pred_rate.unmask_rate
-        len_rate = pred_rate.length_rate
-        # Probabilistically unmask token
-
-        # Fix diagonal entries by setting mask positions to negative sum of other rates
-        mask_positions = (xt == mask).nonzero(as_tuple=True)
-
-        # Zero out rates for non-mask positions
-        unmask_rate[xt != mask] = 0
-
-        # First zero the mask token rate, so it's not included in the sum
-        unmask_rate[*mask_positions, mask] = 0
-        # Then set it to negative sum of other rates
-        unmask_rate[*mask_positions, mask] = -unmask_rate[*mask_positions, :].sum(dim=1)
-
-        # Approximate probability with Euler step 1{x' = x} + Q dt
-        trans_prob = unmask_rate * dt
-        # Temporary xt variable that replaces pad with mask token to avoid illegal memory access
-        _xt = xt.clone()
-        _xt[xt == pad] = mask
-        trans_prob.scatter_add_(
-            2,
-            _xt.unsqueeze(-1),
-            torch.ones_like(_xt.unsqueeze(-1), dtype=unmask_rate.dtype),
-        )
-
-        # Note that pad token is unchanged here
-        new_xt = _sample_tokens(trans_prob.clamp(min=0, max=1))
-        # Put pad back into palce
-        new_xt[xt == pad] = pad
-
-        # Sample if next token should be added
-        first_pad_pos = torch.argmax((new_xt == pad).int(), dim=1)
-        extension_prob = torch.clamp(len_rate * dt, min=0.0, max=1.0)
-        extension = torch.bernoulli(extension_prob).bool()
-        # Find first pad position that will be replaced by mask
-
-        # Replace pad token with mask
-        extend_mask = first_pad_pos < max_length
-        extend_mask = extend_mask & extension
-        extend_id = extend_mask.nonzero()
-        new_xt[extend_id, first_pad_pos[extend_id]] = mask
-
-        new_xt = torch.where((xt != mask) & (xt != pad), xt, new_xt)
-
-        if return_trace:
-            for i in range(batch_size):
-                # Check if the token was changed
-                for j in range(max_length):
-                    if xt[i, j] != pad and xt[i, j] != new_xt[i, j]:
-                        sampling_trace[i].append(
-                            SamplingTraceDatapoint(
-                                t=t[i].item(),
-                                event_type="change",
-                                position=j,
-                                token=new_xt[i, j].item(),
-                            )
-                        )
-
-                # Check if a new token was inserted
-                if extend_mask[i]:
-                    sampling_trace[i].append(
-                        SamplingTraceDatapoint(
-                            t=t[i].item(),
-                            event_type="insertion",
-                            position=first_pad_pos[i].item(),
-                            token=new_xt[i, first_pad_pos[i]].item(),
-                        )
-                    )
-
-        xt = new_xt
-
-    return SamplingResult(samples=xt, trace=sampling_trace)
 
 
 def any_order_mask_insertion_euler_sampling(
@@ -183,7 +87,7 @@ def any_order_mask_insertion_euler_sampling(
         # ——— predict and convert rates ———
         pred_rate = model(xt, t)
         pred_rate = interpolant.to_actual_rate(xt, pred_rate, t)
-        unmask_rate = pred_rate.unmask_rate.softmax(dim=-1)  # (B, L, V)
+        unmask_rate = pred_rate.unmask_rate  # (B, L, V)
         len_rate = pred_rate.length_rate  # (B, L+1)
 
         # ——— unmask step (Euler) ———

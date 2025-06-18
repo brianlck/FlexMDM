@@ -18,4 +18,4 @@ conda deactivate
 conda activate jay_vlmdm
 
 
-python train_MDM.py --wandb
+python train_MDM.py --mask_schedule_type linear --wandb

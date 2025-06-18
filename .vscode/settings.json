@@ -1,3 +1,4 @@
 {
-    "jupyter.notebookFileRoot": "${workspaceFolder}"
+    "jupyter.notebookFileRoot": "${workspaceFolder}",
+    "python.analysis.autoImportCompletions": true
 }
