@@ -1,14 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=wikitext2_any_order
-#SBATCH --partition=kempner_requeue
+#SBATCH --partition=kempner_h100
 #SBATCH --account=kempner_albergo_lab
-#SBATCH --time=05:00:00
-#SBATCH --gres=gpu:4
-#SBATCH --mem=64000
+#SBATCH --partition=kempner_h100
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
-#SBATCH --cpus-per-task=10
+#SBATCH --gpus-per-node=4
+#SBATCH --mem=100GB
+#SBATCH --time=1-00:00:00
 #SBATCH --output=slurm_logs/wikitext2/job-%j.out
-#SBATCH -C a100
 
 python train.py --config-path config/wikitext2 --config-name any_order
