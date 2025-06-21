@@ -1,6 +1,6 @@
 from omegaconf import DictConfig
 from .parenthesis import BracketDataset
-from .text import get_text_dataset, setup_tokeniser, TEXT_DATASETS
+from .text import get_text_dataset, setup_tokeniser_from_dataset, TEXT_DATASETS
 from typing import Optional
 from transformers import AutoTokenizer
 from dataclasses import dataclass
@@ -19,7 +19,7 @@ def setup_data_and_update_config(config: DictConfig) -> DatasetBundle:
     Get the dataset and update the config with token information for text datasets.
     """
     if config.dataset in TEXT_DATASETS:
-        tokeniser = setup_tokeniser()
+        tokeniser = setup_tokeniser_from_dataset(config.dataset)
         train_set = get_text_dataset(
             config.dataset, split="train", max_length=config.interpolant.max_length
         )

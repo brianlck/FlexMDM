@@ -35,20 +35,20 @@ class Schedule(abc.ABC):
         """
         raise NotImplementedError
 
-    def rate_scale_factor(self, t: Tensor):
+    def rate_scale_factor(self, t: Tensor) -> Tensor:
         """
         Return d/dt a(t) / (1 - a(t)) common in rate matrix calculation
         """
         return self.derivative_at(t) / (1 - self.at(t))
 
-    def sample(self, shape, device):
+    def sample(self, shape, device) -> Tensor:
         """
         Sample from the schedule, returns a tensor of shape `shape` with values in [0, 1]
         """
         uniform = torch.rand(shape, device=device)
         return self.inv(uniform)
 
-    def sample_truncated(self, threshold, shape, device):
+    def sample_truncated(self, threshold, shape, device) -> Tensor:
         """
         Sample from a truncated schedule, returns a tensor of shape `shape` with values in [threshold, 1]
         """
