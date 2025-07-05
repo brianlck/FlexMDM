@@ -3,15 +3,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from einops import rearrange
-from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
 from omegaconf import OmegaConf
 from interpolant import ModelPrediction
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 from . import rotary
 from .fused_add_dropout_scale import (
     bias_dropout_add_scale_fused_train,
     bias_dropout_add_scale_fused_inference,
     modulate_fused,
 )
+
+
+flex_attention = torch.compile(flex_attention, mode="max-autotune")
 
 
 def modulate(x, shift, scale):
@@ -135,6 +138,13 @@ class ScalarLengthHead(nn.Module):
 #################################################################################
 
 
+def get_mask_mod(seq_len: torch.Tensor):
+    def mask_mod(b, h, q_idx, kv_idx):
+        return (q_idx <= seq_len[b]) & (kv_idx <= seq_len[b])
+
+    return mask_mod
+
+
 class DDiTBlock(nn.Module):
     def __init__(self, dim, n_heads, cond_dim, mlp_ratio=4, dropout=0.1):
         super().__init__()
@@ -166,8 +176,8 @@ class DDiTBlock(nn.Module):
             else bias_dropout_add_scale_fused_inference
         )
 
-    def forward(self, x, rotary_cos_sin, c, seqlens=None):
-        batch_size, seq_len = x.shape[0], x.shape[1]
+    def forward(self, x, rotary_cos_sin, c, block_mask):
+        batch_size = x.shape[0]
 
         bias_dropout_scale_fn = self._get_bias_dropout_scale()
 
@@ -187,22 +197,12 @@ class DDiTBlock(nn.Module):
         with torch.amp.autocast("cuda", enabled=False):
             cos, sin = rotary_cos_sin
             qkv = rotary.apply_rotary_pos_emb(qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
-        qkv = rearrange(qkv, "b s ... -> (b s) ...")
-        if seqlens is None:
-            cu_seqlens = torch.arange(
-                0,
-                (batch_size + 1) * seq_len,
-                step=seq_len,
-                dtype=torch.int32,
-                device=qkv.device,
-            )
-        else:
-            cu_seqlens = seqlens.cumsum(-1)
-        x = flash_attn_varlen_qkvpacked_func(
-            qkv, cu_seqlens, seq_len, 0.0, causal=False
-        )
 
-        x = rearrange(x, "(b s) h d -> b s (h d)", b=batch_size)
+        q, k, v = rearrange(qkv, "b s three h d -> three b h s d", three=3)
+
+        x = flex_attention(q, k, v, block_mask=block_mask)
+
+        x = rearrange(x, "b h s d -> b s (h d)", b=batch_size)
 
         x = bias_dropout_scale_fn(
             self.attn_out(x), None, gate_msa, x_skip, self.dropout
@@ -315,6 +315,14 @@ class AnyOrderMaskInsertionFlow(nn.Module):
             ],
             dim=-1,
         )
+        seq_lens = (indices != self.pad_token).sum(dim=-1)
+        block_mask = create_block_mask(
+            get_mask_mod(seq_lens),
+            B=B,
+            H=None,
+            Q_LEN=indices.shape[1],
+            KV_LEN=indices.shape[1],
+        )
 
         x = self.vocab_embed(indices)
         c = F.silu(self.sigma_map(t))
@@ -323,7 +331,7 @@ class AnyOrderMaskInsertionFlow(nn.Module):
 
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             for i in range(len(self.blocks)):
-                x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+                x = self.blocks[i](x, rotary_cos_sin, c, block_mask)
 
             # --- unmasking ---
             token_logits = self.output_layer(x[:, :-1], c)

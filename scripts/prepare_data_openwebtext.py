@@ -1,12 +1,11 @@
 from datasets import load_dataset
-from transformers import GPTNeoXTokenizerFast
+from transformers import GPT2TokenizerFast
 from collections import Counter
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 
 # Parameters
-MAX_EXAMPLES = 4_096_000
 LOG_INTERVAL = 1_000_000
 BATCH_SIZE = 1000
 SAVE_DIR = "length_dist_plots-2"
@@ -15,11 +14,11 @@ SAVE_DIR = "length_dist_plots-2"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 # Load full dataset (cached)
-dataset = load_dataset("mlfoundations/dclm-baseline-1.0", split="train", num_proc=64)
-dataset = dataset.select(range(MAX_EXAMPLES))
+dataset = load_dataset("openwebtext", split="train", num_proc=64)
+MAX_EXAMPLES = len(dataset)
 
 # Load tokenizer
-tokenizer = GPTNeoXTokenizerFast.from_pretrained("EleutherAI/gpt-neox-20b")
+tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
 
 # Initialize counter and length list
 counter = Counter()

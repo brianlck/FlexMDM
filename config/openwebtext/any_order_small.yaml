@@ -1,29 +1,31 @@
 trainer: "any-order-flow"
-dataset: "wikitext2"
+dataset: "openwebtext"
 model:
-  hidden_size: 256
-  n_heads: 4
-  cond_dim: 64
-  dropout: 0.1
-  n_blocks: 4
+  hidden_size: 768
+  n_heads: 12
+  cond_dim: 128
+  dropout: 0.05
+  n_blocks: 12
 interpolant:
   type: "any-order"
   tokens: null # filled in automatically
   pad_token: null # filled in automatically
   mask_token: null # filled in automatically
-  max_length: 512
+  max_length: 1024
   insert_schedule:
     type: "linear"
   unmask_schedule:
     type: "linear"
 training:
-  batch_size: 512
+  batch_size: 1024
+  per_gpu_batch_size: 64 # Gradient accumulation happens automatically
+  cpus: 4
   learning_rate: 3e-4
-  nodes: 2
+  nodes: 4
   devices: 4
-  max_steps: 10000
+  max_steps: 500000
   weight_decay: 0.03
-  checkpoint_dir: "checkpoints/wikitext2/any_order"
+  checkpoint_dir: "checkpoints/openwebtext/any_order"
   save_top_k: 1
   save_every_n_epochs: 1
   loss_fn:
@@ -35,4 +37,4 @@ training:
 wandb:
   entity: "jaeyeon_kim-harvard-university"
   project: "interpretable-flow"
-  name: "wikitext2-any-order"
+  name: "openwebtext-any-order"

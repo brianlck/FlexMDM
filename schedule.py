@@ -8,7 +8,7 @@ from torch import Tensor
 def get_schedule_from_config(config: DictConfig):
     match config.type:
         case "geometric":
-            return GeometricSchedule(min=config.min, max=config.max)
+            return GeometricSchedule(min_val=config.min, max_val=config.max)
         case "linear":
             return LinearSchedule()
         case _:
@@ -99,6 +99,6 @@ class GeometricSchedule(Schedule, nn.Module):
         )
 
     def inv(self, alpha: Tensor):
-        log_min = self.min.log()
-        log_max = self.max.log()
+        log_min = self.min.to(alpha.device).log()
+        log_max = self.max.to(alpha.device).log()
         return (torch.log(-torch.log(alpha)) - log_min) / (log_max - log_min)

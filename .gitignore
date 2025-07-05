@@ -23,3 +23,6 @@ outputs/
 
 # wandb
 wandb/
+
+# tmp directory for file dumps
+tmp/

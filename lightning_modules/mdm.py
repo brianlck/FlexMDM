@@ -14,6 +14,7 @@ class MaskedDiffusionModule(pl.LightningModule):
 
         # Initialize model (no length head)
         self.model = DDiTNoLengthModel(config)
+        self.model = torch.compile(self.model)
 
         unmask_schedule = get_schedule_from_config(config.interpolant.unmask_schedule)
 
@@ -28,6 +29,10 @@ class MaskedDiffusionModule(pl.LightningModule):
 
         # Save hyperparameters
         self.save_hyperparameters()
+
+        self.ema_decay = config.training.ema_decay or 0.0
+        self.use_ema = self.ema_decay > 0
+        self._orig_params = {}
 
     def forward(self, x, t) -> torch.Tensor:
         return self.model(x, t)
@@ -81,10 +86,99 @@ class MaskedDiffusionModule(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.learning_rate,
+            weight_decay=self.config.training.weight_decay,
+        )
+        warmup_steps = self.config.training.warmup_steps
+        max_steps = self.config.training.max_steps
+
+        linear_scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=1e-6,
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+        post_warmup = max_steps - warmup_steps
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=post_warmup // 10,
+            T_mult=1,
+            eta_min=0.0,
+        )
+
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[linear_scheduler, cosine_scheduler],
+            milestones=[warmup_steps],
+        )
+        return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
+
+    def optimizer_step(
+        self,
+        epoch: int,
+        batch_idx: int,
+        optimizer,
+        optimizer_closure=None,
+    ):
+        super().optimizer_step(
+            epoch, batch_idx, optimizer, optimizer_closure=optimizer_closure
+        )
+        # log learning rate and gradient norm
+        lr = optimizer.param_groups[0]["lr"]
+        self.log("train/lr", lr, on_step=True, prog_bar=True)
+        grad_norm = torch.sqrt(
+            sum(p.grad.norm(2) ** 2 for p in self.parameters() if p.grad is not None)
+        )
+        self.log("train/grad_norm", grad_norm, on_step=True, prog_bar=True)
+
+        # update EMA
+        if self.use_ema:
+            for n, p in self.named_parameters():
+                self.ema_params[n].mul_(self.ema_decay).add_(
+                    p.data.clone().detach(), alpha=1 - self.ema_decay
+                )
 
     def on_save_checkpoint(self, checkpoint):
         checkpoint["config"] = self.config
+        # save EMA state
+        if self.use_ema:
+            checkpoint["ema_params"] = {n: v.cpu() for n, v in self.ema_params.items()}
 
     def on_load_checkpoint(self, checkpoint):
         self.config = checkpoint["config"]
+
+        unmask_schedule = get_schedule_from_config(
+            self.config.interpolant.unmask_schedule
+        )
+
+        self.interpolant = MDMInterpolant(
+            unmask_schedule=unmask_schedule,
+            vocab_size=self.config.interpolant.tokens,
+            mask_token=self.config.interpolant.mask_token,
+            pad_token=self.config.interpolant.pad_token,
+            max_length=self.config.interpolant.max_length,
+        )
+
+        self.ema_params = checkpoint["ema_params"] if self.use_ema else {}
+
+    def swap_to_ema(self):
+        for name, p in self.named_parameters():
+            self._orig_params[name] = p.data.clone()
+            p.data.copy_(self.ema_params[name].to(p.device))
+
+    def restore_original(self):
+        for name, p in self.named_parameters():
+            p.data.copy_(self._orig_params[name])
+        self._orig_params.clear()
+
+    def on_train_start(self):
+        # initialize and move EMA buffers once model is on correct device
+        if self.use_ema:
+            self.ema_params = {
+                name: param.clone().detach().to(self.device)
+                for name, param in self.named_parameters()
+            }
+            for buf in self.ema_params.values():
+                buf.requires_grad = False
