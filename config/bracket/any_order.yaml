@@ -13,7 +13,9 @@ interpolant:
   mask_token: 0
   pad_token: 3
   insert_schedule:
-    type: "linear"
+    type: "geometric"
+    min: 5
+    max: 0.01
   unmask_schedule:
     type: "linear"
 training:

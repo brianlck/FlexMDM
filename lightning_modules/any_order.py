@@ -113,7 +113,14 @@ class AnyOrderInsertionFlowModule(pl.LightningModule):
 
         x1 = batch
         batch_size = x1.shape[0]
-        t = torch.rand(batch_size, device=x1.device)
+        eps = 1e-6
+        interval = 1.0 - eps
+        interval_size = interval / batch_size
+        u = torch.rand(batch_size, device=x1.device)
+        t = (
+            torch.arange(batch_size, device=x1.device, dtype=u.dtype) + u
+        ) * interval_size
+
         unmask_loss, len_loss, loss = self.training_loss(x1, t)
 
         self.log("train/unmask_loss", unmask_loss, prog_bar=True)

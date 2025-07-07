@@ -126,23 +126,47 @@ def main():
         default=None,
         help="Path to JSON file to save computed metrics",
     )
+    parser.add_argument(
+        "--eval-mode",
+        type=str,
+        choices=["sentence", "chunk"],
+        default="sentence",
+        help="sentence: eval each input as one; chunk: tokenize & split into 1024‐length segments",
+    )
     args = parser.parse_args()
 
     with open(args.input_json, "r", encoding="utf-8") as f:
         samples = json.load(f)
 
-    # compute list of per-sentence entropies and average
-    entropy_list = compute_entropy(samples)
+    # choose sentence‐level or chunk‐level inputs
+    if args.eval_mode == "chunk":
+        # pre‐load tokenizer to split and decode
+        tokenizer = AutoTokenizer.from_pretrained(llama_model_path, use_fast=False)
+        tokenizer.pad_token = tokenizer.eos_token
+        chunk_size = 1024
+        token_id_seqs = [tokenizer.encode(s, add_special_tokens=False) for s in samples]
+        chunks: list[list[int]] = []
+        for seq in token_id_seqs:
+            for i in range(0, len(seq), chunk_size):
+                chunks.append(seq[i : i + chunk_size])
+        # back to text for existing metrics API
+        target_samples = [
+            tokenizer.decode(ids, clean_up_tokenization_spaces=True) for ids in chunks
+        ]
+    else:
+        target_samples = samples
+
+    # compute metrics on target_samples
+    entropy_list = compute_entropy(target_samples)
     avg_entropy = sum(entropy_list) / len(entropy_list)
 
     all_perps = batch_reduce(
-        samples,
+        target_samples,
         compute_generative_perplexity,
         lambda acc, res: acc + res,
         init=[],
         step=args.batch_size,
     )
-
     avg_perp = sum(all_perps) / len(all_perps)
 
     print(f"Average entropy: {avg_entropy:.4f}")
@@ -165,6 +189,11 @@ def main():
     plt.tight_layout()
     plt.savefig(args.length_plot_output)
     print(f"Saved sentence length distribution plot to {args.length_plot_output}")
+
+    if args.eval_mode == "chunk":
+        print(f"Evaluated in chunk mode over {len(target_samples)} segments")
+    else:
+        print(f"Evaluated in sentence mode over {len(target_samples)} samples")
 
 
 if __name__ == "__main__":

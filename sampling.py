@@ -83,7 +83,7 @@ def mdm_euler_sampling(
             print(trans_prob[*mask_pos, mask])
 
         new_xt = _sample_tokens(trans_prob)
-        new_xt = torch.where((xt != mask) & (xt != pad), xt, new_xt)
+        new_xt = torch.where(xt != mask, xt, new_xt)
 
         xt = new_xt
         t = t + dt
@@ -94,7 +94,6 @@ def mdm_euler_sampling(
 @torch.no_grad()
 def any_order_mask_insertion_euler_sampling(
     model: torch.nn.Module,
-    interpolant,
     steps: int,
     mask: int,
     pad: int,
@@ -117,27 +116,17 @@ def any_order_mask_insertion_euler_sampling(
         .view(batch_size, 1)
         .expand(batch_size, max_length)
     )
-    batch_idx_Lp1 = (
-        torch.arange(batch_size, device=device)
-        .view(batch_size, 1)
-        .expand(batch_size, max_length + 1)
-    )
     pos_idx_L = (
         torch.arange(max_length, device=device)
         .view(1, max_length)
         .expand(batch_size, max_length)
-    )
-    gap_idx_Lp1 = (
-        torch.arange(max_length + 1, device=device)
-        .view(1, max_length + 1)
-        .expand(batch_size, max_length + 1)
     )
     sampling_trace = [[] for _ in range(batch_size)] if return_trace else None
 
     for i in range(steps):
         # ——— predict and convert rates ———
         pred_rate = model(xt, t)
-        pred_rate = interpolant.to_actual_rate(xt, pred_rate, t)
+        pred_rate = model.interpolant.to_actual_rate(xt, pred_rate, t)
         unmask_rate = pred_rate.unmask_rate  # (B, L, V)
         len_rate = pred_rate.length_rate  # (B, L+1)
 
@@ -169,63 +158,27 @@ def any_order_mask_insertion_euler_sampling(
         new_xt = torch.where((xt != mask) & (xt != pad), xt, new_xt)
 
         if i != steps - 1:
-            # ——— gap‑wise insertion, fully vectorized ———
-            # 1) sample which gaps to extend
-            ext = torch.bernoulli((len_rate * dt).clamp(0.0, 1.0))  # (B, L+1)
-            xt_len = torch.sum(xt != pad, dim=1)  # (B,)
-            ext = torch.where(
-                torch.arange(max_length + 1, device=device).view(1, max_length + 1)
-                <= xt_len.view(batch_size, 1),
-                ext,
-                torch.zeros_like(ext),
-            )
+            # ——— gap-wise insertion refactored — compute new length, fill masks, scatter tokens ———
+            ext = torch.bernoulli((len_rate * dt).clamp(0.0, 1.0)).long()  # (B, L+1)
+            xt_len = xt.ne(pad).sum(dim=1)  # (B,)
+            gaps = torch.arange(max_length + 1, device=device).view(1, -1)
+            ext = ext * (gaps <= xt_len.view(batch_size, 1)).long()
+            total_ext = ext.sum(dim=1)
+            valid = xt_len + total_ext <= max_length
+            ext = ext * valid.view(batch_size, 1).long()
 
-            # --- vectorized drop of excess insertions to enforce max_length ---
-            ext_sum = ext.sum(dim=1).long()  # (B,)
-            excess = (xt_len + ext_sum - max_length).clamp(min=0).long()  # (B,)
-            rand_vals = torch.rand_like(ext)  # (B, L+1)
-            # push non-insert positions to the end of the sort order
-            masked_rand = torch.where(ext.bool(), rand_vals, torch.ones_like(rand_vals))
-            sorted_rand, _ = masked_rand.sort(dim=1)  # (B, L+1)
-            # for each batch, threshold = kth smallest random among ext positions
-            idx = (excess - 1).clamp(min=0)  # (B,)
-            thresh = torch.where(
-                excess > 0,
-                sorted_rand.gather(1, idx.unsqueeze(1)).squeeze(1),
-                torch.full_like(excess.float(), -1.0),
-            )  # (B,)
-            # drop exactly `excess[i]` positions per batch
-            drop_mask = (rand_vals <= thresh.unsqueeze(1)) & ext.bool()  # (B, L+1)
-            ext = ext.clone()
-            ext[drop_mask] = 0.0
-
-            # 2) compute exclusive prefix sum of ext: number of inserts before each gap
             ext_ex = ext.int().cumsum(dim=1)  # (B, L+1)
+            new_len = xt_len + total_ext  # (B,)
 
-            # 3) compute new positions for every original token
-            new_pos_orig = pos_idx_L + ext_ex[:, :max_length]  # (B, L)
-            valid_orig = (new_pos_orig < max_length) & (
-                pos_idx_L < xt_len.view(batch_size, 1)
-            )  # (B, L)
-            # 4) compute new positions for every inserted mask
-            new_pos_ins = gap_idx_Lp1 + ext_ex - ext.int()  # (B, L+1)
-            valid_ins = ext.bool() & (
-                gap_idx_Lp1 <= xt_len.view(batch_size, 1)
-            )  # (B, L+1)
-
-            # 5) build new tensor by scattering
             xt_tmp = torch.full_like(xt, pad)
+            mask_fill = pos_idx_L < new_len.view(batch_size, 1)
+            xt_tmp[mask_fill] = mask
 
-            # scatter all tokens from new_xt into their shifted slots
-            flat_b_o = batch_idx_L[valid_orig]
-            flat_p_o = new_pos_orig[valid_orig]
-            xt_tmp[flat_b_o, flat_p_o] = new_xt[valid_orig]
-
-            # scatter new mask tokens at each gap insertion
-            flat_b_i = batch_idx_Lp1[valid_ins]
-            flat_p_i = new_pos_ins[valid_ins]
-
-            xt_tmp[flat_b_i, flat_p_i] = mask
+            new_pos_orig = pos_idx_L + ext_ex[:, :max_length]  # (B, L)
+            orig_mask = pos_idx_L < xt_len.view(batch_size, 1)
+            flat_b = batch_idx_L[orig_mask]
+            flat_p = new_pos_orig[orig_mask]
+            xt_tmp[flat_b, flat_p] = new_xt[orig_mask]
         else:
             xt_tmp = new_xt
 
@@ -255,6 +208,155 @@ def any_order_mask_insertion_euler_sampling(
                                 token=mask,
                             )
                         )
+
+        xt = xt_tmp
+        t = t + dt
+
+    return xt, sampling_trace
+
+
+@torch.no_grad()
+def mdm_tau_leaping_sampling(
+    model: MaskedDiffusionModule,
+    steps: int,
+    mask: int,
+    pad: int,
+    batch_size: int,
+    max_length: int,
+    return_trace: bool = False,
+):
+    assert not return_trace, "Trace is not yet supported"
+    device = model.device
+    xt = torch.full((batch_size, max_length), mask, dtype=torch.int64, device=device)
+    dt = 1.0 / steps
+    t = torch.zeros(batch_size, device=device)
+
+    for i in range(steps):
+        # ——— predict and convert rates ———
+        pred = model(xt, t)
+        pred = model.interpolant.to_actual_rate(xt, pred, t)
+        unmask_rate = pred.unmask_rate  # (B, L, V)
+
+        if i == steps - 1:
+            # last step: deterministic unmask via argmax
+            mask_pos = xt == mask  # (B, L)
+            new_token = unmask_rate.argmax(dim=2)  # (B, L)
+            new_xt = xt.clone()
+            new_xt[mask_pos] = new_token[mask_pos]
+            new_xt = torch.where(xt != mask, xt, new_xt)
+            xt = new_xt
+            t = t + dt
+            continue
+        # tau-leaping via Poisson counts
+        counts = torch.poisson(unmask_rate * dt).long()
+        mask_pos = xt == mask  # (B, L)
+        # zero out non-mask positions and mask→mask
+        counts[~mask_pos.unsqueeze(-1).expand_as(counts)] = 0
+        counts[..., mask] = 0
+        # only accept exactly one event
+        sum_c = counts.sum(dim=2)  # (B, L)
+        one_event = sum_c == 1
+        new_token = counts.argmax(dim=2)  # (B, L)
+
+        # build new xt
+        new_xt = xt.clone()
+        new_xt[one_event] = new_token[one_event]
+        # keep pads and already-unmasked tokens
+        new_xt = torch.where(xt != mask, xt, new_xt)
+        xt = new_xt
+        t = t + dt
+
+    return xt, []
+
+
+@torch.no_grad()
+@torch.compile(mode="reduce-overhead")
+def any_order_mask_insertion_tau_leaping_sampling(
+    model: torch.nn.Module,
+    steps: int,
+    mask: int,
+    pad: int,
+    batch_size: int,
+    max_length: int,
+    return_trace: bool = False,
+) -> SamplingResult:
+    device = model.device
+    xt = torch.full((batch_size, max_length), pad, dtype=torch.int64, device=device)
+    sampling_trace = [] if return_trace else None
+    dt = 1.0 / steps
+    t = torch.zeros(batch_size, device=device)
+
+    # Precompute row indices for scatter
+    batch_idx_L = (
+        torch.arange(batch_size, device=device)
+        .view(batch_size, 1)
+        .expand(batch_size, max_length)
+    )
+    pos_idx_L = (
+        torch.arange(max_length, device=device)
+        .view(1, max_length)
+        .expand(batch_size, max_length)
+    )
+
+    for i in range(steps):
+        # --- predict rates ---
+        pred = model(xt, t)
+        pred = model.interpolant.to_actual_rate(xt, pred, t)
+        unmask_rate = pred.unmask_rate  # (B, L, V)
+        len_rate = pred.length_rate  # (B, L+1)
+
+        if i == steps - 1:
+            # last step: deterministic unmask via argmax
+            mask_pos = xt == mask
+            new_token = unmask_rate.argmax(dim=2)
+            new_xt = xt.clone()
+            new_xt[mask_pos] = new_token[mask_pos]
+            new_xt = torch.where(xt == pad, pad, new_xt)
+            new_xt = torch.where((xt != mask) & (xt != pad), xt, new_xt)
+            xt = new_xt
+            t = t + dt
+            continue
+        # --- tau-leaping unmask via Poisson ---
+        counts = torch.poisson(unmask_rate * dt).long()
+        mask_pos = xt == mask
+        counts[~mask_pos.unsqueeze(-1).expand_as(counts)] = 0
+        counts[..., mask] = 0
+        sum_c = counts.sum(dim=2)
+        one_event = sum_c == 1
+        new_token = counts.argmax(dim=2)
+        new_xt = xt.clone()
+        new_xt[one_event] = new_token[one_event]
+        new_xt = torch.where(xt == pad, pad, new_xt)
+        new_xt = torch.where((xt != mask) & (xt != pad), xt, new_xt)
+
+        # insertion only on non-last
+        if i != steps - 1:
+            # --- Poisson insertion, compute new lengths and fill masks ---
+            ext = torch.poisson(len_rate * dt).long()  # (B, L+1)
+            xt_len = xt.ne(pad).sum(dim=1)  # (B,)
+            gaps = torch.arange(max_length + 1, device=device).view(1, -1)
+            ext = ext * (gaps <= xt_len.view(batch_size, 1)).long()
+            total_ext = ext.sum(dim=1)
+            valid = xt_len + total_ext <= max_length
+            ext = ext * valid.view(batch_size, 1).long()
+
+            # compute prefix sums of insertions
+            ext_ex = ext.int().cumsum(dim=1)  # (B, L+1)
+            new_len = xt_len + total_ext  # (B,)
+
+            # initialize with pads, then fill mask up to new_len
+            xt_tmp = torch.full_like(xt, pad)
+            mask_pos = pos_idx_L < new_len.view(batch_size, 1)
+            xt_tmp[mask_pos] = mask
+
+            # shift and scatter original tokens
+            new_pos_orig = pos_idx_L + ext_ex[:, :max_length]  # (B, L)
+            orig_mask = pos_idx_L < xt_len.view(batch_size, 1)
+            flat_b = batch_idx_L[orig_mask]
+            flat_p = new_pos_orig[orig_mask]
+            xt_tmp[flat_b, flat_p] = new_xt[orig_mask]
+        else:
+            xt_tmp = new_xt
 
         xt = xt_tmp
         t = t + dt

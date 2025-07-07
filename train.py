@@ -26,12 +26,16 @@ def train(config: DictConfig):
     torch.manual_seed(42)
 
     if "wandb" in config and rank_zero_only.rank == 0:
-        wandb.init(
+        init_kwargs = dict(
             project="interpretable-flow",
             entity=config.wandb.entity,
             config=OmegaConf.to_container(config, resolve=True),
             name=config.wandb.name,
         )
+        # resume wandb run if we're resuming from a checkpoint
+        if "resume_path" in config.training:
+            init_kwargs["resume"] = "allow"
+        wandb.init(**init_kwargs)
         wandb_logger = WandbLogger(
             project=wandb.run.project,
             name=wandb.run.name,
