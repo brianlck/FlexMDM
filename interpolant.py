@@ -26,7 +26,7 @@ class ModelPrediction:
         if self.expected_gaps is None:
             _, _, L = self.length_posterior.shape
             index = torch.arange(0, L, device=token_logits.device).view(1, 1, -1)
-            self.expected_gaps = (self.length_posterior * index).sum(dim=-1)
+            self.expected_gaps = (F.softmax(self.length_posterior, dim=-1) * index).sum(dim=-1)
 
 
 @dataclass
@@ -179,11 +179,10 @@ class AnyOrderMaskInsertionInterpolant(JointInterpolant):
         """
         Return the ELBO weight for the training, can be changed depends on the empirical results
         """
-        eps = 1e-6
         insert_weight = self.insertion_schedule.rate_scale_factor(t)
         insert_weight = insert_weight[:, None].expand(-1, x1.shape[1] + 1)
 
-        unmask_weight = 1.0 / (1 - t + eps)
+        unmask_weight = self.unmask_schedule.rate_scale_factor(t)
         unmask_weight = unmask_weight.unsqueeze(1).expand(-1, x1.shape[1])
 
         return unmask_weight, insert_weight

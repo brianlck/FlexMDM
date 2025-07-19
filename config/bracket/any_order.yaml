@@ -4,7 +4,7 @@ model:
   hidden_size: 256
   n_heads: 4
   cond_dim: 64
-  dropout: 0.1
+  dropout: 0.0
   n_blocks: 4
 interpolant:
   type: "any-order"
@@ -13,19 +13,19 @@ interpolant:
   mask_token: 0
   pad_token: 3
   insert_schedule:
-    type: "geometric"
-    min: 5
-    max: 0.01
+    type: "sin"
   unmask_schedule:
     type: "linear"
 training:
-  batch_size: 32
+  batch_size: 2048
+  per_gpu_batch_size: 2048 # Gradient accumulation happens automatically
+  cpus: 1
   learning_rate: 0.0001
   devices: 1
   nodes: 1
   weight_decay: 0.01
   max_steps: null
-  num_epochs: 100
+  num_epochs: 10000
   checkpoint_dir: "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/checkpoints/bracket/any_order"
   save_top_k: 1
   save_every_n_epochs: 1
@@ -33,7 +33,9 @@ training:
     unmask: "elbo"
     insert: "expectation"
   warmup_steps: 1000
-  ema_decay: 0.9999
+  ema_decay: 0.99
+  filter_max_length: false
+  # resume_path: "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/checkpoints/bracket/any_order/20250711-145941/last.ckpt"
 wandb:
   entity: "jaeyeon_kim-harvard-university"
   project: "interpretable-flow"

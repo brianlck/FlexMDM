@@ -268,6 +268,94 @@ def mdm_tau_leaping_sampling(
 
     return xt, []
 
+# Not used in production, for debugging purposes
+lengths = {4: 0.1, 16: 0.4, 32: 0.4, 64: 0.1}
+
+def binomial_mass(k, n, p):
+    """
+    Calculate the probability mass function (PMF) for a binomial distribution.
+    
+    Args:
+        k (int): Number of successes
+        n (int): Number of trials
+        p (float): Probability of success in a single trial
+        
+    Returns:
+        float: Probability mass P(X = k)
+    """
+    import math
+    
+    # Calculate binomial coefficient (n choose k)
+    try:
+        binom_coef = math.factorial(n) / (math.factorial(k) * math.factorial(n - k))
+    except ValueError:
+        # Handle cases where k > n or negative values
+        return 0.0
+        
+    # Calculate probability mass
+    return binom_coef * (p ** k) * ((1 - p) ** (n - k))
+
+def calculate_rate_batch(alpha_t, len_t):
+    """
+    Calculate rate for a batch of alpha_t and len_t values.
+    
+    Args:
+        alpha_t (torch.Tensor): Tensor of shape (batch_size,)
+        len_t (torch.Tensor): Tensor of shape (batch_size,)
+        
+    Returns:
+        torch.Tensor: Tensor of shape (batch_size,) containing calculated rates
+    """
+    batch_size = alpha_t.shape[0]
+    device = alpha_t.device
+    
+    # Initialize tensors for numerator and denominator
+    nom = torch.zeros(batch_size, device=device)
+    denom = torch.zeros(batch_size, device=device)
+    
+    for length, probability in lengths.items():
+        # Create mask for valid entries where len_t <= length
+        valid_mask = (len_t <= length) & (len_t >= 0)
+        
+        if not valid_mask.any():
+            continue
+        
+        valid_indices = valid_mask.nonzero(as_tuple=True)[0]
+        valid_len_t = len_t[valid_indices]
+        valid_alpha_t = alpha_t[valid_indices]
+        
+        # Calculate binomial probabilities efficiently using torch distribution
+        binom_dist = torch.distributions.Binomial(total_count=length, probs=valid_alpha_t)
+        binom_probs = binom_dist.log_prob(valid_len_t).exp()
+        
+        # Update numerator and denominator for valid indices
+        nom[valid_indices] += (length - valid_len_t) * probability * binom_probs
+        denom[valid_indices] += probability * binom_probs
+    
+    # Handle division by zero in a vectorized way
+    result = torch.zeros_like(nom)
+    div_mask = denom > 0
+    result[div_mask] = nom[div_mask] / (denom[div_mask])
+    
+    return result
+
+# Keep the original function for backward compatibility
+def calculate_rate(alpha_t, len_t):
+    """Legacy scalar version of calculate_rate"""
+    if isinstance(alpha_t, torch.Tensor) and alpha_t.ndim > 0:
+        return calculate_rate_batch(alpha_t, len_t)
+    
+    nom, denom = 0, 0
+    for length, probability in lengths.items():
+        if length >= len_t:
+            nom += (length - len_t) * probability * binomial_mass(len_t, length, alpha_t)
+            denom += probability * binomial_mass(len_t, length, alpha_t)
+    
+    if denom == 0:
+        return 0.0
+    
+    return nom /denom
+
 
 @torch.no_grad()
 @torch.compile(mode="reduce-overhead")
@@ -282,7 +370,7 @@ def any_order_mask_insertion_tau_leaping_sampling(
 ) -> SamplingResult:
     device = model.device
     xt = torch.full((batch_size, max_length), pad, dtype=torch.int64, device=device)
-    sampling_trace = [] if return_trace else None
+    sampling_trace = []
     dt = 1.0 / steps
     t = torch.zeros(batch_size, device=device)
 
@@ -301,6 +389,7 @@ def any_order_mask_insertion_tau_leaping_sampling(
     for i in range(steps):
         # --- predict rates ---
         pred = model(xt, t)
+        xt_len = (xt != pad).sum(dim=1)
         pred = model.interpolant.to_actual_rate(xt, pred, t)
         unmask_rate = pred.unmask_rate  # (B, L, V)
         len_rate = pred.length_rate  # (B, L+1)
@@ -360,5 +449,7 @@ def any_order_mask_insertion_tau_leaping_sampling(
 
         xt = xt_tmp
         t = t + dt
+        if return_trace:
+            sampling_trace.append(xt)
 
     return xt, sampling_trace

@@ -83,7 +83,7 @@ def train(config: DictConfig):
         log_every_n_steps=10,
         enable_checkpointing=True,
         default_root_dir=config.training.checkpoint_dir,
-        gradient_clip_val=5.0,
+        gradient_clip_val=1.0,
     )
     # Only one of max_steps or max_epochs will be used
     if config.training.max_steps is not None:

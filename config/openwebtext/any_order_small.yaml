@@ -13,9 +13,7 @@ interpolant:
   mask_token: null # filled in automatically
   max_length: 1024
   insert_schedule:
-    type: "geometric"
-    min: 5
-    max: 0.01
+    type: "cosine"
   unmask_schedule:
     type: "linear"
 training:
@@ -36,7 +34,6 @@ training:
   warmup_steps: 2000
   ema_decay: 0.9999
   filter_max_length: false
-  resume_path: /n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/outputs/2025-07-06/12-28-01/checkpoints/openwebtext/any_order/20250706-122804/last.ckpt
 wandb:
   entity: "jaeyeon_kim-harvard-university"
   project: "interpretable-flow"

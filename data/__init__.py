@@ -38,7 +38,7 @@ def setup_data_and_update_config(config: DictConfig) -> DatasetBundle:
         config.interpolant.mask_token = tokeniser.mask_token_id
 
     if config.dataset == "bracket":
-        train_set = BracketDataset(100000, {4: 0.1, 16: 0.4, 32: 0.4, 64: 0.1})
+        train_set = BracketDataset(2048, {4: 0.1, 16: 0.4, 32: 0.4, 64: 0.1})
         val_set = BracketDataset(300, {4: 0.1, 16: 0.4, 32: 0.4, 64: 0.1})
 
     train_loader = DataLoader(

@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=generate_samples
+#SBATCH --job-name=evaluate_samples_only
 #SBATCH --account=kempner_albergo_lab
-#SBATCH --partition=kempner_requeue
+#SBATCH --partition=kempner_h100
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --mem=100GB
@@ -10,10 +10,10 @@
 #SBATCH --output=slurm_logs/vlmdm/job-%A_%a.out
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=brianlee.lck@gmail.com
-#SBATCH --array=15-19
+#SBATCH --array=0-19
 
+# ...existing environment setup...
 source /n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/.venv/bin/activate
-
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_USE_CUDA_DSA=1
 export HF_HOME=/n/netscratch/albergo_lab/Everyone/hf_cache
@@ -42,21 +42,26 @@ CKPT=${CKPTS[MODEL_IDX]}
 SAMPLER=${SAMPLERS[SAMPLER_IDX]}
 STEP=${STEP_SIZES[STEP_IDX]}
 
-echo "Running model=$MODEL sampler=$SAMPLER step=$STEP (task $TASK)"
-
-# generate samples
-srun python generate_samples.py \
-    --checkpoint_path "${CKPT}" \
-    --total_samples 1024 \
-    --model_type "${MODEL}" \
-    --sampler_type "${SAMPLER}" \
-    --step_size "${STEP}" \
-    -o "tmp/owt/${SAMPLER}/cosine_${MODEL}_generated_samples_${STEP}.json"
-
+echo "Evaluating samples for model=$MODEL sampler=$SAMPLER step=$STEP (task $TASK)"
 # evaluate samples
+srun python evaluate_samples.py \
+    --input-json "tmp/owt/${SAMPLER}/${MODEL}_generated_samples_${STEP}.json" \
+    --batch-size 32 \
+    --results-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/${MODEL}_eval_results_${STEP}.json" \
+    --length-plot-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/${MODEL}_length_plot_${STEP}.png" \
+    --eval-mode "sentence"
+
+
+srun python evaluate_samples.py \
+    --input-json "tmp/owt/${SAMPLER}/geometric_${MODEL}_generated_samples_${STEP}.json" \
+    --batch-size 32 \
+    --results-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/geometic_${MODEL}_eval_results_${STEP}.json" \
+    --length-plot-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/geometic_${MODEL}_length_plot_${STEP}.png" \
+    --eval-mode "sentence"
+
 srun python evaluate_samples.py \
     --input-json "tmp/owt/${SAMPLER}/cosine_${MODEL}_generated_samples_${STEP}.json" \
     --batch-size 32 \
-    --results-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/cosine_${MODEL}_eval_results_${STEP}.json" \
+    --results-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/cosine${MODEL}_eval_results_${STEP}.json" \
     --length-plot-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/cosine_${MODEL}_length_plot_${STEP}.png" \
-    --eval-mode "chunk"
+    --eval-mode "sentence"

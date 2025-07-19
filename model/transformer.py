@@ -216,6 +216,7 @@ class DDiTBlock(nn.Module):
             x,
             self.dropout,
         )
+
         return x
 
 
@@ -278,7 +279,7 @@ class AnyOrderMaskInsertionFlow(nn.Module):
                 for _ in range(config.model.n_blocks)
             ]
         )
-
+        
         self.output_layer = DDitFinalLayer(
             config.model.hidden_size, self.vocab_size, config.model.cond_dim
         )
@@ -335,10 +336,11 @@ class AnyOrderMaskInsertionFlow(nn.Module):
 
             # --- unmasking ---
             token_logits = self.output_layer(x[:, :-1], c)
+
             # --- length prediction ---
             match self.len_predict_type:
                 case "distribution":
-                    length_posterior = F.softmax(self.len_pred(x, c), dim=-1)
+                    length_posterior = self.len_pred(x, c)
                     return ModelPrediction(
                         token_logits=token_logits,
                         length_posterior=length_posterior,

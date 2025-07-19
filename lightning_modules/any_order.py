@@ -94,17 +94,20 @@ class AnyOrderInsertionFlowModule(pl.LightningModule):
 
             case "distribution":
                 gaps, gaps_mask = interpolant_sample.gaps_and_mask
-                gap_one_hot = F.one_hot(
-                    gaps,
-                    num_classes=self.config.interpolant.max_length + 1,
-                ).to(prediction.length_posterior.dtype)
-                insertion_loss = insert_weight[gaps_mask] * mse(
-                    prediction.length_posterior[gaps_mask], gap_one_hot[gaps_mask]
+                insertion_loss = insert_weight[gaps_mask] * F.cross_entropy(
+                    prediction.length_posterior[gaps_mask], gaps[gaps_mask]
                 )
                 insertion_loss = insertion_loss.sum() / scale_factor
 
         total_loss = unmask_loss + insertion_loss
         return unmask_loss, insertion_loss, total_loss
+    
+    def sample_time(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        eps = 1e-6
+        interval = 1.0 - eps
+        interval_size = interval / batch_size
+        u = torch.rand(batch_size, device=device)
+        return (torch.arange(batch_size, device=device, dtype=u.dtype) + u) * interval_size
 
     def training_step(self, batch, batch_idx):
         # Extract input data
@@ -112,21 +115,17 @@ class AnyOrderInsertionFlowModule(pl.LightningModule):
             batch = batch["input_ids"]
 
         x1 = batch
-        batch_size = x1.shape[0]
-        eps = 1e-6
-        interval = 1.0 - eps
-        interval_size = interval / batch_size
-        u = torch.rand(batch_size, device=x1.device)
-        t = (
-            torch.arange(batch_size, device=x1.device, dtype=u.dtype) + u
-        ) * interval_size
+        t = self.sample_time(x1.shape[0], x1.device)
 
+        # Calculate the combined loss normally
         unmask_loss, len_loss, loss = self.training_loss(x1, t)
-
+        
+        # Log component losses
         self.log("train/unmask_loss", unmask_loss, prog_bar=True)
         self.log("train/len_loss", len_loss, prog_bar=True)
         self.log("train/total_loss", loss, prog_bar=True)
-
+        
+        
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -134,9 +133,7 @@ class AnyOrderInsertionFlowModule(pl.LightningModule):
             batch = batch["input_ids"]
 
         x1 = batch
-        batch_size = x1.shape[0]
-
-        t = torch.rand(batch_size, device=x1.device)
+        t = self.sample_time(x1.shape[0], x1.device)
         unmask_loss, len_loss, loss = self.training_loss(x1, t)
 
         self.log("val/unmask_loss", unmask_loss, prog_bar=True, sync_dist=True)
@@ -161,10 +158,9 @@ class AnyOrderInsertionFlowModule(pl.LightningModule):
             total_iters=warmup_steps,
         )
         post_warmup = max_steps - warmup_steps
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_0=post_warmup // 10,
-            T_mult=1,
+            T_max=post_warmup,
             eta_min=0.0,
         )
 
