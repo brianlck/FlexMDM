@@ -8,9 +8,15 @@ from torch import Tensor
 def get_schedule_from_config(config: DictConfig):
     match config.type:
         case "geometric":
-            return GeometricSchedule(min=config.min, max=config.max)
+            return GeometricSchedule(min_val=config.min, max_val=config.max)
         case "linear":
             return LinearSchedule()
+        case "sin":
+            return SinSchedule()
+        case "cosine":
+            return CosineSchedule()
+        case "polynomial":
+            return PolynomialSchedule(exp=config.exp)
         case _:
             raise ValueError(f"Invalid schedule type: {config.type}")
 
@@ -35,24 +41,25 @@ class Schedule(abc.ABC):
         """
         raise NotImplementedError
 
-    def rate_scale_factor(self, t: Tensor):
+    def rate_scale_factor(self, t: Tensor) -> Tensor:
         """
         Return d/dt a(t) / (1 - a(t)) common in rate matrix calculation
         """
         return self.derivative_at(t) / (1 - self.at(t))
 
-    def sample(self, shape, device):
+    def sample(self, shape, device) -> Tensor:
         """
         Sample from the schedule, returns a tensor of shape `shape` with values in [0, 1]
         """
         uniform = torch.rand(shape, device=device)
         return self.inv(uniform)
 
-    def sample_truncated(self, threshold, shape, device):
+    def sample_truncated(self, threshold, shape, device) -> Tensor:
         """
         Sample from a truncated schedule, returns a tensor of shape `shape` with values in [threshold, 1]
         """
         uniform = torch.rand(shape, device=device)
+        threshold = self.at(threshold)
         return self.inv(uniform * (1 - threshold) + threshold)
 
     @abc.abstractmethod
@@ -99,6 +106,51 @@ class GeometricSchedule(Schedule, nn.Module):
         )
 
     def inv(self, alpha: Tensor):
-        log_min = self.min.log()
-        log_max = self.max.log()
+        log_min = self.min.to(alpha.device).log()
+        log_max = self.max.to(alpha.device).log()
         return (torch.log(-torch.log(alpha)) - log_min) / (log_max - log_min)
+
+
+class SinSchedule(Schedule, nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def at(self, t: Tensor):
+        return torch.sin(torch.pi / 2 * t)
+
+    def derivative_at(self, t: Tensor):
+        return (torch.pi / 2) * torch.cos(torch.pi / 2 * t)
+
+    def inv(self, alpha: Tensor):
+        return (2 / torch.pi) * torch.asin(alpha.clamp(min=0., max=1.))
+
+
+class CosineSchedule(Schedule, nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def at(self, t: Tensor):
+        return 1 - torch.cos(torch.pi / 2 * t)
+    
+    def derivative_at(self, t: Tensor):
+        return (torch.pi / 2) * torch.sin(torch.pi / 2 * t)
+    
+    def rate_scale_factor(self, t):
+        return (torch.pi/2) * torch.tan(torch.pi / 2 * t)
+    
+    def inv(self, alpha):
+        return (2 / torch.pi) * torch.arccos(1 - alpha.clamp(min=0., max=1.))
+
+class PolynomialSchedule(Schedule, nn.Module):
+    def __init__(self, exp):
+        super().__init__()
+        self.exp = exp
+    
+    def at(self, t: Tensor):
+        return t ** self.exp
+    
+    def derivative_at(self, t: Tensor):
+        return self.exp * t ** (self.exp - 1)
+    
+    def inv(self, alpha: Tensor):
+        return alpha ** (1 / self.exp)

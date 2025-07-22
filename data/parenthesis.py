@@ -10,7 +10,7 @@ def generate_bracket(length: int, seq: str = ""):
         return seq
     p = random.randint(0, 1)
     if p == 0 or seq == "":
-        return generate_bracket(length - 2, "(" + seq + ")")
+        return generate_bracket(length - 2, "(" + seq + "(")
     else:
         return seq + generate_bracket(length, "")
 
@@ -20,12 +20,28 @@ class BracketDataset(Dataset):
         lengths = list(length_probs.keys())
         probs = [length_probs[k] for k in lengths]
         self.data = []
+
+        # Track actual length distribution
+        length_counts = {length: 0 for length in lengths}
+
         for _ in range(n):
             L = int(np.random.choice(lengths, p=probs))
             seq = generate_bracket(L)
             mapped = [1 if c == "(" else 2 for c in seq]
             mapped += [3] * (64 - len(mapped))
             self.data.append(torch.tensor(mapped, dtype=torch.long))
+
+            # Count actual sequence length
+            actual_length = len(seq)
+            if actual_length in length_counts:
+                length_counts[actual_length] += 1
+            else:
+                length_counts[actual_length] = 1
+
+        # Print length distribution
+        print("Length distribution in dataset:")
+        for length, count in sorted(length_counts.items()):
+            print(f"  Length {length}: {count} sequences ({count/n:.2%})")
 
     @staticmethod
     def parse_tensor(tensor: torch.Tensor):
