@@ -12,7 +12,11 @@ class dLLMTrainer(Trainer):
     def compute_loss(self, model, inputs, num_items_in_batch=None, return_outputs=False):
         """
         Absorbing state diffusion loss computation
+        NOTE: time step t here is different from ours
         """
+        normalize_constant = 4096
+        batch_size = inputs["input_ids"].size(0)
+
         labels, t, num_prompt_tokens = inputs.pop("labels"), inputs.pop("t"), inputs.pop("num_prompt_tokens")
         outputs = model(**inputs)
         logits = outputs.logits
@@ -22,8 +26,14 @@ class dLLMTrainer(Trainer):
         if (self.state.global_step + 1) % self.args.logging_steps == 0:
             self.log({"unscaled_loss": (unscaled_loss.sum() / (labels != -100).sum()).item()})
         loss = unscaled_loss / t
-        loss = loss.sum() / (inputs["input_ids"].numel() - num_prompt_tokens)
-        return loss if not return_outputs else (loss, outputs)
+        loss = loss.sum() / (batch_size * normalize_constant)
+        
+        # double-check debug
+        if return_outputs:
+            print("Retuning outputs")
+            return loss, {"dummy": None}
+
+        return loss
 
 
 class dLLMSFTDataset(torch.utils.data.Dataset):
@@ -91,8 +101,11 @@ class dLLMDataCollator(DefaultDataCollator):
         batch["num_prompt_tokens"] = 0
         if "prompt_lengths" in batch:
             prompt_lengths = batch.pop("prompt_lengths")
-            prompt_length_indices = torch.arange(noisy_batch.shape[1]).unsqueeze(0)
-            prompt_mask = prompt_length_indices < prompt_lengths
+            prompt_lengths = prompt_lengths.unsqueeze(1) # (B, 1)
+            prompt_length_indices = torch.arange(noisy_batch.shape[1]).unsqueeze(0) # (1, L)
+
+            # mask the prompt tokens
+            prompt_mask = prompt_length_indices < prompt_lengths # (B, L)
             noisy_batch[prompt_mask] = batch["input_ids"][prompt_mask].clone()
             batch["labels"][prompt_mask] = -100
             batch["num_prompt_tokens"] = prompt_mask.sum()
@@ -113,6 +126,7 @@ Your reasoning here
 
 def preprocess_dataset(data, tokenizer, max_length, test_split=0.01):
     preprocessed_data = []
+    # TODO: check if the pad_token = mask_token
     for i in tqdm(range(len(data)), desc="Preprocessing dataset"):
         question = SYSTEM_PROMPT + "\n\n" + data[i]["question"]
         trajectory = f"<reasoning>{data[i]['thinking_trajectories'][0]}</reasoning>\n<answer>{data[i]['attempt']}</answer>"

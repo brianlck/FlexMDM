@@ -2,13 +2,16 @@ import torch
 import argparse
 from transformers import AutoTokenizer, AutoModel, TrainingArguments
 from datasets import load_dataset
-from torch.utils.data import DataLoader
 from peft import LoraConfig, get_peft_model, TaskType
 import os
 from sft_trainer import *
-import torch.distributed as dist
+from sft_trainer_ours import *
 import random
 import numpy as np
+import wandb
+from gsm8k import preprocess_gsm8k
+from llada_dit import LLaDA_DIT
+from pathlib import Path
 
 
 def init_seed(seed):
@@ -20,6 +23,35 @@ def init_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 
+# ------------------------------------------------------------
+# Util function for counting the number of parameters
+# ------------------------------------------------------------
+def count_parameters(named_params, key: str | None = None):
+    return sum(p.numel()
+        for n, p in named_params
+        if p.requires_grad and (key is None or key in n)
+    )
+
+
+# ------------------------------------------------------------
+# Util function for adding special tokens to the tokenizer
+# ------------------------------------------------------------
+SPECIAL_TOKENS = ["<reasoning>", "</reasoning>", "<answer>", "</answer>"]
+
+def get_reasoning_tokenizer(model_name: str, model: AutoModel | None = None, add_to_model: bool = True):
+    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="right", trust_remote_code=True, use_fast=True)
+    device = model.device
+    
+    missing = [t for t in SPECIAL_TOKENS if t not in tokenizer.get_vocab()]
+    if missing:
+        tokenizer.add_special_tokens({"additional_special_tokens": missing})
+    
+    if add_to_model:
+        model.resize_token_embeddings(len(tokenizer)).to(device)
+    
+    return tokenizer, model
+
+
 # Initialize argument parser
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -28,77 +60,111 @@ def parse_args():
     parser.add_argument(
         "--model_name", type=str, default="GSAI-ML/LLaDA-8B-Base", help="Name of the pretrained model"
     )
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size for training")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training")
     parser.add_argument(
-        "--max_length", type=int, default=4096, help="Maximum sequence length for tokenization"
+        "--max_length", type=int, default=1024, help="Maximum sequence length for tokenization"
     )
-    parser.add_argument("--num_epochs", type=int, default=20, help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for the optimizer")
-    parser.add_argument("--grad_accum_steps", type=int, default=4, help="Gradient accumulation steps")
+    parser.add_argument("--num_epochs", type=int, default=100, help="Number of training epochs")
+    parser.add_argument("--lora_lr", type=float, default=1e-4, help="Learning rate for the LoRA")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for other parameters")
+    parser.add_argument("--grad_accum_steps", type=int, default=2, help="Gradient accumulation steps")
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/n/netscratch/sham_lab/Everyone/jay_brian/llada_sft",
+        default="/n/netscratch/albergo_lab/Lab/sft-gsm8k-checkpoints-2",
         help="Directory to save model checkpoints and logs",
     )
-    parser.add_argument("--job_name", type=str, default="llada-s1", help="Job Name")
-    parser.add_argument("--train_data", type=str, default="simplescaling/s1K", help="Path to training data")
-    parser.add_argument(
-        "--debugging", action="store_true", help="Use while debugging model - only disables wandb logging"
-    )
+    parser.add_argument("--job_name", type=str, default="llada-sft-gsm8k-test-run", help="Job Name")
+    parser.add_argument("--train_data", type=str, default="gsm8k", help="Path to training data")
+    parser.add_argument("--wandb", action="store_true", help="whether to use wandb")
+    parser.add_argument("--variable_length", action="store_true", help="whether to use variable length training")
+    parser.add_argument("--beta", type=float, default=1.0, help="beta for the variable length training")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to the checkpoint to resume from")
 
     return parser.parse_args()
 
 
 # Model loading with LoRA integration
 def load_model_and_tokenizer(args):
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name, padding_side="right", trust_remote_code=True, use_fast=True
-    )
-
-    # Load model
-    model = AutoModel.from_pretrained(
+    # Load the backbone LLaDA model
+    backbone = AutoModel.from_pretrained(
         args.model_name,
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
+        return_dict=True,
     )
+    print("Backbone LLaDA loaded!")
 
-    # LoRA configuration
+    backbone.config.output_hidden_states = True
+    backbone.config.return_dict = True
+
+    # Add LoRA to backbone first (like eval.py)
     lora_config = LoraConfig(
         r=128,
-        lora_alpha=256,
-        target_modules=["q_proj", "k_proj", "v_proj"],
-        lora_dropout=0.05,
+        lora_alpha=128,  
+        target_modules=["q_proj", "k_proj", "v_proj", "transformer.ff_out"],  
+        lora_dropout=0.1,
         bias="none",
         task_type=TaskType.CAUSAL_LM,
     )
+    backbone = get_peft_model(backbone, lora_config)
 
-    # Applying LoRA model
-    model = get_peft_model(model, lora_config)
-    model = model.to(torch.bfloat16)  # Cast fp32 lora params to bf16
+    # Load tokenizer and add reasoning tokens if needed for GSM8K
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, padding_side="right", trust_remote_code=True, use_fast=True)
+    
+    print("Tokenizer loaded!")
 
+    if args.variable_length:
+        model = LLaDA_DIT(backbone, pad_token_id=tokenizer.pad_token_id, d_model=4096)
+    else:
+        model = backbone
+
+    # Load checkpoint if provided (following eval.py pattern)
+    if args.resume_from_checkpoint:
+        ckpt_dir = Path(args.resume_from_checkpoint)
+        checkpoint_path = ckpt_dir / "pytorch_model.bin"
+        
+        if checkpoint_path.exists():
+            state = torch.load(checkpoint_path, map_location="cpu")
+            missing, unexpected = model.load_state_dict(state, strict=False)
+            print(f"Missing keys: {missing}")
+            print(f"Unexpected keys: {unexpected}")
+            print(f"Resumed from checkpoint {args.resume_from_checkpoint}")
+        else:
+            print(f"Checkpoint file not found at {checkpoint_path}")
+
+    model = model.to(torch.bfloat16)
+    print("Final trainer model loaded!")
+    
     return tokenizer, model
 
 
 # Dataset loading
 def load_data(args, tokenizer):
-    data = load_dataset(args.train_data, split="train")
-    train_data, eval_data = preprocess_dataset(data, tokenizer, args.max_length)
+    if args.train_data == "gsm8k":
+        train_data = preprocess_gsm8k(
+            split="train", tokenizer=tokenizer, max_length=args.max_length
+        )
+        eval_data = preprocess_gsm8k(
+            split="test", tokenizer=tokenizer, max_length=args.max_length
+        )
+    else:
+        data = load_dataset(args.train_data, split="train")
+        train_data, eval_data = preprocess_dataset(data, tokenizer, args.max_length)
+
     print("Train data length: ", len(train_data))
     print("Eval data length: ", len(eval_data))
     train_dataset = dLLMSFTDataset(train_data, tokenizer, args.max_length)
     eval_dataset = dLLMSFTDataset(eval_data, tokenizer, args.max_length, eval=True)
     return train_dataset, eval_dataset
 
-
+ 
 # Training setup
 def train_model(args, tokenizer, model):
     # Load dataset
     train_dataset, eval_dataset = load_data(args, tokenizer)
 
     # Training arguments setup
-    # TODO: check if the evaluation strategy is correct
     training_args = TrainingArguments(
         output_dir=os.path.join(args.output_dir, args.job_name),
         num_train_epochs=args.num_epochs,
@@ -106,15 +172,17 @@ def train_model(args, tokenizer, model):
         gradient_accumulation_steps=args.grad_accum_steps,
         eval_strategy="steps",
         eval_steps = 100,
+        logging_steps = 10,
         save_steps = 100,
-        save_total_limit=20,
-        learning_rate=args.learning_rate,
-        load_best_model_at_end=True,
-        weight_decay=0.1,
+        save_safetensors=False,
+        load_best_model_at_end=False,
         max_grad_norm=1.0,
         bf16=True,
-        report_to="wandb" if not args.debugging else "none",
+        lr_scheduler_type="cosine",
+        lr_scheduler_kwargs={"num_cycles": 5},
+        warmup_ratio=0.05,
         remove_unused_columns=False,
+        report_to="wandb" if args.wandb else None,
     )
 
     # Create optimizer and scheduler
@@ -123,14 +191,49 @@ def train_model(args, tokenizer, model):
         * args.num_epochs
         / (args.batch_size * args.grad_accum_steps * torch.cuda.device_count())
     )
+
+    # setup the trainable parameters
+    lora_params  = [p for n, p in model.named_parameters() if "lora" in n and p.requires_grad]
+    head_params  = [p for n, p in model.named_parameters() if "lora" not in n and p.requires_grad]
+
+    # parameter count check
+    num_lora_params = count_parameters(model.named_parameters(), key = 'lora')
+    whole_trainable_params = count_parameters(model.named_parameters())
+    print(f"Total trainable parameters: {whole_trainable_params:,}")
+    print(f"  └─ LoRA adapter params          : {num_lora_params:,}")
+    print(f"  └─ From-scratch params          : {whole_trainable_params - num_lora_params:,}")
+
     # Initialize Trainer with custom dLLMTrainer
-    trainer = dLLMTrainer(
+    if args.variable_length:
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": lora_params, "lr": args.lora_lr, "weight_decay": 0.1},
+                {"params": head_params, "lr": args.lr, "weight_decay": 0.1}
+            ],
+        )
+        trainer = dLLMVariableLengthTrainer(
+            model=model,
+            args=training_args,
+            data_collator=dLLMVariableDataCollator(tokenizer=tokenizer, mask_token_id=126336, max_length=args.max_length, beta = args.beta, low_discrepancy=True),
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            optimizers=(optimizer, None),
+        )
+    else:
+        optimizer = torch.optim.AdamW(lora_params, lr = args.lora_lr, weight_decay = 0.1)
+        trainer = dLLMTrainer(
         model=model,
         args=training_args,
         data_collator=dLLMDataCollator(tokenizer=tokenizer, mask_token_id=126336, max_length=args.max_length),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-    )
+        optimizers=(optimizer, None),
+        )
+
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+    if args.wandb and local_rank == 0:
+        wandb.init(project="SFT-llada", name=args.job_name, entity="jaeyeon_kim-harvard-university")
 
     # Start training
     trainer.train()
