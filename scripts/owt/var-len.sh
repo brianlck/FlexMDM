@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --mem=200GB
-#SBATCH --time=02-00:00:00
+#SBATCH --time=03-00:00:00
 #SBATCH -o slurm_logs/openwebtext/job-%j.out
 #SBATCH -e slurm_logs/openwebtext/job-%j.err
 #SBATCH --mail-type=END,FAIL

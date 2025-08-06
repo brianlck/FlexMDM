@@ -13,17 +13,18 @@ interpolant:
   mask_token: null # filled in automatically
   max_length: 1024
   insert_schedule:
-    type: "cosine"
+    type: "linear"
   unmask_schedule:
     type: "linear"
 training:
+  only_embed_insert: true
   batch_size: 1024
   per_gpu_batch_size: 64 # Gradient accumulation happens automatically
   cpus: 4
   learning_rate: 3e-4
   nodes: 4
   devices: 4
-  max_steps: 500000
+  max_steps: 1000000
   weight_decay: 0.03
   checkpoint_dir: "checkpoints/openwebtext/any_order"
   save_top_k: 1
@@ -31,6 +32,7 @@ training:
   loss_fn:
     unmask: "elbo"
     insert: "expectation"
+  reset_lr: false
   warmup_steps: 2000
   ema_decay: 0.9999
   filter_max_length: false

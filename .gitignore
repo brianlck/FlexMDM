@@ -26,3 +26,6 @@ wandb/
 
 # tmp directory for file dumps
 tmp/
+
+
+d1/SFT/results/

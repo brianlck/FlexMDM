@@ -41,4 +41,4 @@ srun --ntasks-per-node=1 --gpus-per-task=4 \
       --variable_length \
       --job_name=llada-sft-gsm8k \
       --train_data=gsm8k \
-      --resume_from_checkpoint=/n/netscratch/albergo_lab/Lab/sft-checkpoints/llada-sft-openwebtext/checkpoint-90000
+      --resume_from_checkpoint=/n/netscratch/albergo_lab/Lab/transdim-flow/sft-datamix-checkpoints/llada-sft-openwebtext/checkpoint-190000/

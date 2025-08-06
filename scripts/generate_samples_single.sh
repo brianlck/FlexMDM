@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=generate_samples
+#SBATCH --job-name=generate_samples_single
 #SBATCH --account=kempner_albergo_lab
 #SBATCH --partition=kempner_requeue
 #SBATCH --nodes=1
@@ -7,10 +7,9 @@
 #SBATCH --mem=100GB
 #SBATCH --constraint h100
 #SBATCH --time=1-00:00:00
-#SBATCH --output=slurm_logs/vlmdm/job-%A_%a.out
+#SBATCH --output=slurm_logs/vlmdm/job-%j.out
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=brianlee.lck@gmail.com
-#SBATCH --array=15-19
 
 source /n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/.venv/bin/activate
 
@@ -19,36 +18,23 @@ export TORCH_USE_CUDA_DSA=1
 export HF_HOME=/n/netscratch/albergo_lab/Everyone/hf_cache
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
-# define models, checkpoints, step sizes, and samplers
-MODELS=(mdm flow)
-CKPTS=(
-  /n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/outputs/2025-06-30/18-45-34/checkpoints/openwebtext/mdm/20250630-184537/last.ckpt
-  /n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/outputs/2025-08-02/01-29-58/checkpoints/openwebtext/any_order/20250802-012959/last.ckpt
-)
-STEP_SIZES=(128 256 1024 2048 4096)
-SAMPLERS=(euler tau-leaping)
-SUBDIR=1M_linear
+# Configuration parameters - modify these as needed
+MODEL="flow"
+CKPT="/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/outputs/2025-07-29/00-17-21/checkpoints/openwebtext/any_order/20250729-001723/last.ckpt"
+SAMPLER="tau-leaping"
+STEP=1024
+TOTAL_SAMPLES=1024
+SUBDIR="new_linear"
 
-# compute which model, sampler, and step to run
-TOTAL_STEPS=${#STEP_SIZES[@]}
-TOTAL_SAMPLERS=${#SAMPLERS[@]}
-TASK=$SLURM_ARRAY_TASK_ID
-MODEL_IDX=$(( TASK / (TOTAL_STEPS * TOTAL_SAMPLERS) ))
-REM=$(( TASK % (TOTAL_STEPS * TOTAL_SAMPLERS) ))
-SAMPLER_IDX=$(( REM / TOTAL_STEPS ))
-STEP_IDX=$(( REM % TOTAL_STEPS ))
+echo "Running model=$MODEL sampler=$SAMPLER step=$STEP"
 
-MODEL=${MODELS[MODEL_IDX]}
-CKPT=${CKPTS[MODEL_IDX]}
-SAMPLER=${SAMPLERS[SAMPLER_IDX]}
-STEP=${STEP_SIZES[STEP_IDX]}
-
-echo "Running model=$MODEL sampler=$SAMPLER step=$STEP (task $TASK)"
+# Create output directory
+mkdir -p "tmp/owt/${SAMPLER}"
 
 # generate samples
 # srun python generate_samples.py \
 #     --checkpoint_path "${CKPT}" \
-#     --total_samples 1024 \
+#     --total_samples "${TOTAL_SAMPLES}" \
 #     --model_type "${MODEL}" \
 #     --sampler_type "${SAMPLER}" \
 #     --step_size "${STEP}" \
@@ -61,9 +47,9 @@ srun python evaluate_samples.py \
     --results-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/${SUBDIR}/${MODEL}_eval_results_${STEP}.json" \
     --length-plot-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/${SUBDIR}/${MODEL}_length_plot_${STEP}.png" \
     --eval-mode "sentence" \
-    --mauve \
-    --entropy \
     --perplexity \
+    --entropy \
+    --mauve \
     --reference-perplexity
 
-    
+echo "Job completed successfully"

@@ -62,7 +62,10 @@ class AnyOrderInsertionFlowModule(pl.LightningModule):
         self._orig_params = {}
 
     def forward(self, x, t) -> ModelPrediction:
-        return self.model(x, t)
+        if self.config.training.only_embed_insert:
+            return self.model(x, self.interpolant.insertion_schedule.at(t))
+        else:
+            return self.model(x, t)
 
     def training_loss(self, x1, t):
         interpolant_sample = self.interpolant.sample_interpolant(t, x1)
@@ -148,26 +151,32 @@ class AnyOrderInsertionFlowModule(pl.LightningModule):
             lr=self.learning_rate,
             weight_decay=self.config.training.weight_decay,
         )
+        
         warmup_steps = self.config.training.warmup_steps
         max_steps = self.config.training.max_steps
 
+        # Always create a fresh schedule starting from step 0
+        # This allows extending training beyond original max_steps
         linear_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
             start_factor=1e-6,
             end_factor=1.0,
             total_iters=warmup_steps,
+            last_epoch=-1,
         )
         post_warmup = max_steps - warmup_steps
         cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
             T_max=post_warmup,
             eta_min=0.0,
+            last_epoch=-1,
         )
 
         scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer,
             schedulers=[linear_scheduler, cosine_scheduler],
             milestones=[warmup_steps],
+            last_epoch=-1,
         )
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
 

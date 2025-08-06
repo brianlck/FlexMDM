@@ -4,6 +4,8 @@ import math
 import os
 import random
 import time
+import pickle
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -139,7 +141,7 @@ def uncond_generate(model, tokenizer, args):
         # for unconditional generation, we set prompt to None
 
         if args.variable_length:
-            out = generate_ours(
+            out, sapling_trace = generate_ours(
                 model,
                 None,
                 tokenizer,
@@ -165,36 +167,85 @@ def uncond_generate(model, tokenizer, args):
         print("-" * 50)
         all_generations.append(generated_texts)
         wall_times.append(time.time() - start_time)
+
+        break
     
     avg_wall_time = sum(wall_times) / len(wall_times)
     return avg_wall_time, all_generations
 
+
+def save_progress(filename, all_generations, processed_count):
+    """Save progress to allow resumption after preemption"""
+    progress_file = filename.replace('.json', '_progress.pkl')
+    progress_data = {
+        'all_generations': all_generations,
+        'processed_count': processed_count,
+        'timestamp': datetime.now().isoformat()
+    }
+    with open(progress_file, 'wb') as f:
+        pickle.dump(progress_data, f)
+    if dist.get_rank() == 0:
+        print(f"Progress saved: {processed_count} samples processed")
+
+def load_progress(filename):
+    """Load previous progress if available"""
+    progress_file = filename.replace('.json', '_progress.pkl')
+    if os.path.exists(progress_file):
+        try:
+            with open(progress_file, 'rb') as f:
+                progress_data = pickle.load(f)
+            if dist.get_rank() == 0:
+                print(f"Resuming from progress: {progress_data['processed_count']} samples already processed")
+                print(f"Previous run timestamp: {progress_data['timestamp']}")
+            return progress_data['all_generations'], progress_data['processed_count']
+        except Exception as e:
+            if dist.get_rank() == 0:
+                print(f"Error loading progress file: {e}")
+            return [], 0
+    return [], 0
 
 def evaluate(
     model,
     tokenizer,
     dataloader,
     args,
+    filename,
 ):
     model.eval()
     total_processed = torch.tensor(0, device=model.device)
     wall_times = []
-    all_generations = []
     device = model.device
+    
+    # Load previous progress
+    all_generations, processed_count = load_progress(filename)
+    
+    # Skip already processed samples
+    samples_to_skip = processed_count
+    current_sample = 0
+    
+    save_interval = 10  # Save progress every 10 batches
+    batch_count = 0
 
     for batch in tqdm(dataloader, disable=False, desc=f"Rank {dist.get_rank()}", position=dist.get_rank()):
+        # Skip already processed batches
+        batch_size = len(batch["answers"])
+        if current_sample + batch_size <= samples_to_skip:
+            current_sample += batch_size
+            continue
+        
         start_time = time.time()
         input_ids = batch["input_ids"].to(device)
         gt_answers = batch["answers"]
         questions = batch["questions"]
         prompts = batch["prompts"]
 
-        print(prompts)
+        if dist.get_rank() == 0:
+            print(f"Processing batch {batch_count + 1}, samples {current_sample}-{current_sample + batch_size}")
 
         tokenised_prompts = tokenizer(prompts, padding="max_length", max_length=args.gen_length, return_tensors="pt").input_ids.to(device)
 
         if args.variable_length:
-            out = generate_ours(
+            out, trace = generate_ours(
                 model, 
                 tokenised_prompts, 
                 tokenizer, 
@@ -203,6 +254,8 @@ def evaluate(
                 model_type = "variable",
                 temperature = args.temperature,
                 remasking = args.remasking,
+                confidence_method=args.confidence_method,
+                use_sliding_window=args.use_sliding_window,
             )
             generated_texts = tokenizer.batch_decode(out[:, :], skip_special_tokens=True)
         else:
@@ -217,18 +270,6 @@ def evaluate(
                 remasking = args.remasking,
             )
             generated_texts = tokenizer.batch_decode(out[:, :], skip_special_tokens=False)
-            # out = generat(
-            #     model,
-            #     input_ids,
-            #     tokenizer,
-            #     steps=1024,
-            #     gen_length=args.gen_length,
-            #     block_length=args.block_length,
-            #     temperature=args.temperature,
-            #     cfg_scale=0.0,
-            #     remasking=args.remasking,
-            # )
-            # generated_texts = tokenizer.batch_decode(out[:, -args.gen_length:], skip_special_tokens=False)
         
         example_result = [
             {
@@ -241,7 +282,13 @@ def evaluate(
         ]
         all_generations.extend(example_result)
         total_processed += len(generated_texts)
+        current_sample += batch_size
         wall_times.append(time.time() - start_time)
+        batch_count += 1
+
+        # Periodic progress saving
+        if batch_count % save_interval == 0:
+            save_progress(filename, all_generations, current_sample)
 
         # Print individual results
         if dist.get_rank() == 0:
@@ -253,7 +300,10 @@ def evaluate(
             print("-" * 50)
             print(f"Ground truth: {gt_answers[idx]}")
 
-    avg_wall_time = sum(wall_times) / len(wall_times)
+    # Final progress save
+    save_progress(filename, all_generations, current_sample)
+    
+    avg_wall_time = sum(wall_times) / len(wall_times) if wall_times else 0
     metrics = {
         "wall_time": avg_wall_time,
         "generations": all_generations,
@@ -358,7 +408,7 @@ if __name__ == "__main__":
     parser.add_argument("--variable_length", action="store_true")
     parser.add_argument("--beta", type=float, default=0.5)
     parser.add_argument("--few_shot", type=int, default=0)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument(
         "--dataset", type=str, choices=["gsm8k", "math", "countdown", "sudoku", "game24"], default="gsm8k"
     )
@@ -367,6 +417,8 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_path", type=str, default="/n/netscratch/albergo_lab/Lab/sft-checkpoints/llada-sft-openwebtext/checkpoint-40000")
 
     # sampler setup
+    parser.add_argument("--confidence_method", type=str, default="prob_diff", choices=["position", "prob_diff", "top_prob", "entropy"])
+    parser.add_argument("--use_sliding_window", action="store_true", help="Use sliding window for confidence calculation")
     parser.add_argument("--unconditional", action="store_true")
     parser.add_argument("--gen_length", type=int, default=1024)
     parser.add_argument("--block_length", type=int, default=1024)
@@ -380,6 +432,16 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="results/mdm_test")
     parser.add_argument("--dont_use_box", action="store_true")
     args = parser.parse_args()
+    
+    # Log all arguments
+    if dist.get_rank() == 0:
+        print("=" * 50)
+        print("EVALUATION ARGUMENTS:")
+        print("=" * 50)
+        for arg_name, arg_value in vars(args).items():
+            print(f"{arg_name}: {arg_value}")
+        print("=" * 50)
+    
     num_evals = {"gsm8k": -1}
 
     # backbone model load
@@ -451,7 +513,7 @@ if __name__ == "__main__":
             filename = f"{args.output_dir}/mdm_{args.remasking}_{args.gen_length}_{args.block_length}_{dist.get_rank()}_generations.json"
         print(f"Saving generations to {filename}")
 
-        metrics = evaluate(model, tokenizer, dataloader, args)
+        metrics = evaluate(model, tokenizer, dataloader, args, filename)
 
         if not args.dont_save:
             with open(filename, "w") as f:
@@ -466,9 +528,18 @@ if __name__ == "__main__":
                         "gen_length": args.gen_length,
                         "diffusion_steps": args.diffusion_steps,
                         "block_length": args.block_length,
+                        "confidence_method": args.confidence_method,
+                        "use_sliding_window": args.use_sliding_window,
                     },
                     f,
                     indent=2,
                 )
+            
+            # Clean up progress file after successful completion
+            progress_file = filename.replace('.json', '_progress.pkl')
+            if os.path.exists(progress_file):
+                os.remove(progress_file)
+                if dist.get_rank() == 0:
+                    print(f"Cleaned up progress file: {progress_file}")
 
     cleanup_ddp()

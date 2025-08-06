@@ -82,6 +82,9 @@ def any_order_mask_insertion_tau_leaping_sampling(
     prompts: Optional[torch.Tensor] = None,
     confidence_based_sampling: bool = True,
     return_trace: bool = False,
+    alpha: float = 5.0,  # hyperparameter for window size calculation
+    confidence_method: str = "prob_diff",  # "position", "top_prob", "prob_diff", "entropy"
+    use_sliding_window: bool = True,  # whether to use sliding window for position selection
 ):
     insertion_schedule = GeometricSchedule(min_val=10.0, max_val=0.01)
     unmasking_schedule = LinearSchedule()
@@ -172,30 +175,75 @@ def any_order_mask_insertion_tau_leaping_sampling(
             rate_scale_factor = unmasking_schedule.rate_scale_factor(t)
             unmask_counts = torch.poisson(num_mask_positions.float() * rate_scale_factor * dt).long()  # (B,)
             
-            # 2. Calculate confidence from raw token logits (not processed rates)
-            token_logits = pred.token_logits  # (B, L, V) - raw logits from model
-            unmask_probs = F.softmax(token_logits, dim=-1)  # (B, L, V)
+            # 2. Calculate confidence based on selected method
+            if confidence_method == "position":
+                # Position-based confidence: position i / len(xt)
+                xt_len = (xt != pad).sum(dim=1)  # (B,) - current sequence lengths
+                position_indices = torch.arange(max_length, device=device).unsqueeze(0).expand(batch_size, -1)  # (B, L)
+                confidence = 1.0 - (position_indices.float() / xt_len.unsqueeze(1).float().clamp(min=1))  # (B, L)
             
-            # Calculate confidence as gap between most likely and second most likely tokens
-            # top2_probs, _ = torch.topk(unmask_probs, k=2, dim=-1)  # (B, L, 2)
-            confidence = unmask_probs.max(dim=-1)[0]  # (B, L) - max probability at each position
+            elif confidence_method == "top_prob":
+                # Top probability confidence
+                token_logits = pred.token_logits  # (B, L, V)
+                unmask_probs = F.softmax(token_logits, dim=-1)  # (B, L, V)
+                confidence = unmask_probs.max(dim=-1)[0]  # (B, L)
             
-            # Set confidence to -inf for non-mask positions
-            confidence = torch.where(mask_positions, confidence, torch.tensor(-float('inf'), device=device))
+            elif confidence_method == "prob_diff":
+                # Probability difference confidence (top - second top)
+                token_logits = pred.token_logits  # (B, L, V)
+                unmask_probs = F.softmax(token_logits, dim=-1)  # (B, L, V)
+                top2_probs, _ = torch.topk(unmask_probs, k=2, dim=-1)  # (B, L, 2)
+                confidence = top2_probs[:, :, 0] - top2_probs[:, :, 1]  # (B, L)
+            
+            elif confidence_method == "entropy":
+                # Entropy-based confidence (lower entropy = higher confidence)
+                token_logits = pred.token_logits  # (B, L, V)
+                unmask_probs = F.softmax(token_logits, dim=-1)  # (B, L, V)
+                # Calculate entropy: -sum(p * log(p))
+                entropy = -torch.sum(unmask_probs * torch.log(unmask_probs + 1e-10), dim=-1)  # (B, L)
+                # Convert to confidence: lower entropy = higher confidence
+                confidence = -entropy  # (B, L) - negative entropy so lower entropy gives higher confidence
+            
+            else:
+                raise ValueError(f"Unknown confidence_method: {confidence_method}")
+            
+            # 3. Apply window constraint if enabled
+            if use_sliding_window:
+                # Vectorized window creation: calculate dynamic k for each batch
+                k_values = torch.maximum(
+                    torch.minimum(
+                        (alpha * num_mask_positions).long(), 
+                        torch.tensor(16, device=device
+                    )
+                ), num_mask_positions)  # (B,)
+                
+                # Get cumulative count of mask positions
+                mask_cumsum = mask_positions.cumsum(dim=1)  # (B, L)
+                
+                # Create window mask: position is eligible if it's a mask and within first k masks
+                is_within_window = mask_cumsum <= k_values.unsqueeze(1)  # (B, L)
+                window_mask = mask_positions & is_within_window  # (B, L)
+                
+                # Set confidence to -inf for positions outside the window or non-mask positions
+                confidence = torch.where(window_mask, confidence, torch.tensor(-float('inf'), device=device))
+            else:
+                # No window constraint - only mask positions are eligible
+                confidence = torch.where(mask_positions, confidence, torch.tensor(-float('inf'), device=device))
             
             new_xt = xt.clone()
             
             # Vectorized unmasking
             max_unmask = unmask_counts.max().item()
             if max_unmask > 0:
-                # Get top-k indices for all batches (pad with -1 for batches needing fewer)
+                # Get top-k indices for all batches
                 _, all_top_indices = torch.topk(confidence, k=max_unmask, dim=1, largest=True)  # (B, max_unmask)
                 
                 # Create mask for valid unmask operations
                 unmask_mask = torch.arange(max_unmask, device=device).unsqueeze(0) < unmask_counts.unsqueeze(1)  # (B, max_unmask)
                 
-                # Sample tokens from logits for all positions
-                sampled_tokens = torch.multinomial(unmask_probs.view(-1, unmask_probs.size(-1)), num_samples=1).view(batch_size, max_length)  # (B, L)
+                # Get most likely tokens (need logits for token generation)
+                if confidence_method == "position":
+                    token_logits = pred.token_logits  # (B, L, V)
                 most_likely_tokens = token_logits.argmax(dim=-1)  # (B, L)
                 
                 # Gather the tokens to place at selected positions
@@ -270,7 +318,7 @@ def any_order_mask_insertion_tau_leaping_sampling(
         if return_trace:
             sampling_trace.append(xt)
 
-    return xt
+    return xt, sampling_trace
 
 
 @torch.no_grad()
@@ -284,6 +332,9 @@ def generate_ours(
     temperature: float,
     remasking: str = 'random',
     mask_id: int = 126336,
+    alpha: float = 5.0,  # Add alpha parameter
+    confidence_method: str = "prob_diff",  # "position", "top_prob", "prob_diff", "entropy"
+    use_sliding_window: bool = True,  # Add sliding window parameter
 ):
     pad_id = tokenizer.pad_token_id
     device = model.device
@@ -293,6 +344,10 @@ def generate_ours(
     t = 0.0
 
     with torch.autocast(device_type="cuda"):
-        return any_order_mask_insertion_tau_leaping_sampling(model, steps, mask_id, pad_id, B, L, return_trace=False, prompts=prompt)
+        return any_order_mask_insertion_tau_leaping_sampling(
+            model, steps, mask_id, pad_id, B, L, 
+            prompts=prompt, return_trace=True, alpha=alpha,
+            confidence_method=confidence_method, use_sliding_window=use_sliding_window
+        )
 
 

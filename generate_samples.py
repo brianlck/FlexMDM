@@ -5,6 +5,7 @@ from sampling import (
     any_order_mask_insertion_tau_leaping_sampling,
     mdm_tau_leaping_sampling,
 )
+from schedule import GeometricSchedule, LinearSchedule
 from data.text import setup_tokeniser
 import torch
 import torch.nn as nn

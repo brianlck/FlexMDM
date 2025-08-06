@@ -209,6 +209,7 @@ def main():
     parser.add_argument("--entropy", action="store_true", default=False, help="Evaluate entropy")
     parser.add_argument("--perplexity", action="store_true", default=False, help="Evaluate generative perplexity")
     parser.add_argument("--mauve", action="store_true", default=False, help="Evaluate mauve score")
+    parser.add_argument("--reference-perplexity", action="store_true", default=False, help="Evaluate reference text perplexity")
     args = parser.parse_args()
 
     # Derive perplexity plot path from length plot path if not specified
@@ -283,11 +284,37 @@ def main():
         print(f"Average generative perplexity: {avg_perp:.4f}")
     else:
         avg_perp = None
+        all_perps = None
         print("Generative perplexity evaluation skipped")
+    
+    # Conditionally compute reference text perplexity
+    if args.reference_perplexity:
+        print("Computing reference text perplexity...")
+        reference_samples = get_reference_text_dataset()
+        reference_perps = batch_reduce(
+            reference_samples,
+            lambda batch: compute_generative_perplexity(
+                batch, 
+                input_is_tokenized=False,
+                tokenizer=None,
+                model_type=args.model_type
+            ),
+            lambda acc, res: acc + res,
+            init=[],
+            step=args.batch_size,
+        )
+        avg_reference_perp = sum(reference_perps) / len(reference_perps)
+        print(f"Average reference perplexity: {avg_reference_perp:.4f}")
+    else:
+        avg_reference_perp = None
+        reference_perps = None
+        reference_samples = None
+        print("Reference perplexity evaluation skipped")
     
     # Conditionally compute mauve score
     if args.mauve:
-        reference_samples = get_reference_text_dataset()
+        if reference_samples is None:
+            reference_samples = get_reference_text_dataset()
         mauve_score = compute_mauve_score(samples, reference_samples)
         print(f"Mauve score: {mauve_score:.4f}")
     else:
@@ -295,19 +322,23 @@ def main():
         print("Mauve evaluation skipped")
     
     if args.results_output:
-        results = {"avg_entropy": avg_entropy, "avg_perplexity": avg_perp, "mauve_score": mauve_score}
+        results = {
+            "avg_entropy": avg_entropy, 
+            "avg_perplexity": avg_perp, 
+            "avg_reference_perplexity": avg_reference_perp,
+            "mauve_score": mauve_score
+        }
         with open(args.results_output, "w", encoding="utf-8") as outf:
             json.dump(results, outf, indent=2)
         print(f"Saved metrics to {args.results_output}")
     
     # plot distribution of GPT2‐tokenized sentence lengths
-    gpt2_tokenizer = AutoTokenizer.from_pretrained(llama_model_path)
+    gpt2_tokenizer = AutoTokenizer.from_pretrained(gpt2_model_path)
     lengths = [len(gpt2_tokenizer.encode(s, add_special_tokens=False)) for s in samples]
     plt.figure()
     plt.hist(lengths, bins=50, color="skyblue", edgecolor="black")
     plt.title("GPT2 Tokenized Sentence Length Distribution")
     plt.savefig(args.length_plot_output)
-
 
     # Conditionally create perplexity vs. tokenized length plot when perplexity is evaluated
     if args.perplexity and args.eval_mode == "sentence":
@@ -320,14 +351,36 @@ def main():
                     _val.append(perp)
             idx.append(i)
             val.append(sum(_val) / len(_val))
-        plt.figure(figsize=(10, 6))
-        plt.scatter(idx, val, alpha=0.6, color="blue")
+        
+        plt.figure(figsize=(12, 6))
+        
+        # Plot candidate samples
+        plt.scatter(idx, val, alpha=0.6, color="blue", label="Candidate samples")
+        
+        # Plot reference samples if available
+        if args.reference_perplexity and reference_samples is not None:
+            reference_lengths = [len(gpt2_tokenizer.encode(s, add_special_tokens=False)) for s in reference_samples]
+            ref_idx = []
+            ref_val = []
+            for i in range(0, 1024):
+                _ref_val = []
+                for l, perp in zip(reference_lengths, reference_perps):
+                    if l >= i:
+                        _ref_val.append(perp)
+                ref_idx.append(i)
+                ref_val.append(sum(_ref_val) / len(_ref_val) if _ref_val else 0)
+            
+            plt.scatter(ref_idx, ref_val, alpha=0.6, color="red", label="Reference samples")
+        
+        # Add horizontal lines for specific token lengths
         for tlen in [10, 20, 30, 40, 50, 75, 100]:
             if tlen < len(val):
-                plt.axhline(y=val[tlen], linestyle='--', color='red', alpha=0.5)
+                plt.axhline(y=val[tlen], linestyle='--', color='blue', alpha=0.3)
+        
         plt.title("Perplexity vs. Tokenized Length")
         plt.xlabel("Number of tokens")
         plt.ylabel("Log Perplexity")
+        plt.legend()
         ax = plt.gca()
         ticks = list(ax.get_yticks())
         for tlen in [10, 20, 30, 40, 50, 75, 100]:
@@ -350,7 +403,8 @@ def main():
         print(f"Evaluated in chunk mode over {len(target_samples)} segments (using pre-tokenized input)")
     else:
         print(f"Evaluated in sentence mode over {len(target_samples)} samples")
-        print(f"Saved perplexity vs. length scatter plot to {args.perplexity_plot_output}")
+        if args.perplexity:
+            print(f"Saved perplexity vs. length scatter plot to {args.perplexity_plot_output}")
 
 if __name__ == "__main__":
     main()

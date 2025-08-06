@@ -71,7 +71,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/n/netscratch/albergo_lab/Lab/sft-gsm8k-checkpoints-2",
+        default="/n/netscratch/albergo_lab/Lab/sft-datamix-gsm8k-checkpoints",
         help="Directory to save model checkpoints and logs",
     )
     parser.add_argument("--job_name", type=str, default="llada-sft-gsm8k-test-run", help="Job Name")
