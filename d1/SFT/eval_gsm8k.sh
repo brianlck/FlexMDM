@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=gen_gsm8k_samples
-#SBATCH --account=kempner_albergo_lab
-#SBATCH --partition=kempner_requeue
+#SBATCH --account=albergo_lab
+#SBATCH --partition=gpu_h200
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
-#SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
 #SBATCH --mem=128GB
-#SBATCH -C h100
+#SBATCH -C h200
 #SBATCH --cpus-per-task=16
 #SBATCH --time=01-00:00:00
-#SBATCH --output=slurm_logs/sft_openwebtext/%j.out
-#SBATCH --error=slurm_logs/sft_openwebtext/%j.err
+#SBATCH --output=slurm_logs/gsm8k_sample/%j.out
+#SBATCH --error=slurm_logs/gsm8k_sample/%j.err
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=brianlee.lck@gmail.com
 
@@ -25,17 +25,20 @@ export NODE_RANK=$SLURM_NODEID
 
 
 python -m torch.distributed.run \
-    --nproc_per_node=4 \
+    --nproc_per_node=1 \
     --nnodes=1 \
     --node_rank=0 \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
     eval.py \
-    --variable_length \
-    --checkpoint_path /n/netscratch/albergo_lab/Lab/sft-datamix-gsm8k-checkpoints/llada-sft-gsm8k/checkpoint-5900/ \
-    --output_dir results/top-prob-slide-10-datamix-gsm8k-5900 \
-    --diffusion_steps 256 \
+    --checkpoint_path /n/netscratch/sham_lab/Everyone/jay_brian/ckpt-for-paper/mdm-gsm8k/jay-gsm8k-mdm/checkpoint-9320 \
+    --output_dir results/mdm-test \
+    --alpha 15.0 \
+    --max_window 32 \
+    --diffusion_steps 1024 \
     --confidence_method top_prob \
     --use_sliding_window \
-    --batch_size 16 \
+    --batch_size 1 \
     --dataset gsm8k
+
+

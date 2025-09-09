@@ -150,6 +150,8 @@ def uncond_generate(model, tokenizer, args):
                 model_type = "variable",
                 temperature = args.temperature,
                 remasking = args.remasking,
+                alpha = args.alpha,
+                max_window = args.max_window,
             )
         else:
             out = generate_ours(
@@ -256,6 +258,8 @@ def evaluate(
                 remasking = args.remasking,
                 confidence_method=args.confidence_method,
                 use_sliding_window=args.use_sliding_window,
+                alpha=args.alpha,
+                max_window=args.max_window,
             )
             generated_texts = tokenizer.batch_decode(out[:, :], skip_special_tokens=True)
         else:
@@ -426,6 +430,8 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--remasking", type=str, default="random")
 
+    parser.add_argument("--alpha", type=float, default=1.0, help="Alpha value for the slide")
+    parser.add_argument("--max_window", type=int, default=10, help="Maximum window size for the slide")
 
     parser.add_argument("--add_reasoning", action="store_true")
     parser.add_argument("--dont_save", action="store_true")
@@ -508,7 +514,7 @@ if __name__ == "__main__":
 
         os.makedirs(args.output_dir, exist_ok=True)
         if args.variable_length:
-            filename = f"{args.output_dir}/{args.diffusion_steps}_ours_{args.remasking}_{args.beta}_{dist.get_rank()}_generations.json"
+            filename = f"{args.output_dir}/{args.diffusion_steps}_alpha_{args.alpha}_max_window_{args.max_window}_ours_{args.remasking}_{args.beta}_{dist.get_rank()}_generations.json"
         else:
             filename = f"{args.output_dir}/mdm_{args.remasking}_{args.gen_length}_{args.block_length}_{dist.get_rank()}_generations.json"
         print(f"Saving generations to {filename}")

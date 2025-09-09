@@ -82,6 +82,8 @@ def generate(
             start_idx = prompt_len + num_block * block_length
             end_idx = prompt_len + (num_block + 1) * block_length
 
+            print(start_idx, end_idx)
+
             block_mask_index = x[:, start_idx:end_idx] == mask_id
             num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps_per_block)
 

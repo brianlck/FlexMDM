@@ -11,8 +11,11 @@ import numpy as np
 import wandb
 from gsm8k import preprocess_gsm8k
 from llada_dit import LLaDA_DIT
+import code
 from pathlib import Path
 
+
+INFILL_DATASETS = ["code-infill"]
 
 def init_seed(seed):
     random.seed(seed)
@@ -148,6 +151,9 @@ def load_data(args, tokenizer):
         eval_data = preprocess_gsm8k(
             split="test", tokenizer=tokenizer, max_length=args.max_length
         )
+    elif args.train_data == "code-infill":
+        train_data = code.preprocess_opc_coder(tokenizer, args.max_length)
+        eval_data = code.preprocess_human_eval(tokenizer, args.max_length)
     else:
         data = load_dataset(args.train_data, split="train")
         train_data, eval_data = preprocess_dataset(data, tokenizer, args.max_length)
@@ -211,24 +217,67 @@ def train_model(args, tokenizer, model):
                 {"params": head_params, "lr": args.lr, "weight_decay": 0.1}
             ],
         )
-        trainer = dLLMVariableLengthTrainer(
-            model=model,
-            args=training_args,
-            data_collator=dLLMVariableDataCollator(tokenizer=tokenizer, mask_token_id=126336, max_length=args.max_length, beta = args.beta, low_discrepancy=True),
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            optimizers=(optimizer, None),
-        )
+
+        if args.train_data in INFILL_DATASETS:
+            infill_tokens = tokenizer.encode("<infill-boundary>")
+            print("infill tokens: ", infill_tokens)
+            trainer = dLLMVariableLengthTrainer(
+                model=model,
+                args=training_args,
+                data_collator=dLLMVariableDataCollator(
+                    tokenizer=tokenizer,
+                    mask_token_id=126336,
+                    max_length=args.max_length + 2 * len(infill_tokens),
+                    beta=args.beta,
+                    low_discrepancy=True,
+                    is_infill_task=True,
+                    infill_tokens=infill_tokens
+                ),
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                optimizers=(optimizer, None),
+            )
+        else:
+            trainer = dLLMVariableLengthTrainer(
+                model=model,
+                args=training_args,
+                data_collator=dLLMVariableDataCollator(tokenizer=tokenizer, mask_token_id=126336, max_length=args.max_length, beta = args.beta, low_discrepancy=True),
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                optimizers=(optimizer, None),
+            )
     else:
+        if args.train_data in INFILL_DATASETS:
+            instruction = tokenizer.encode("You are instructed to perform an infill task. Please fill in the missing parts of the code. The prefix and suffix are provided and delimited by <prefix> </prefix> and <suffix> </suffix> tokens.")
+            prefix_delimiters = [tokenizer.encode("<prefix>"), tokenizer.encode("</prefix>")]
+            suffix_delimiters = [tokenizer.encode("<suffix>"), tokenizer.encode("</suffix>")]
+            total_length = args.max_length + len(prefix_delimiters[0]) + len(prefix_delimiters[1]) + len(suffix_delimiters[0]) + len(suffix_delimiters[1]) + len(instruction)
+            trainer = dLLMTrainer(
+                model=model,
+                args=training_args,
+                data_collator=dLLMDataCollator(
+                    tokenizer=tokenizer,
+                    mask_token_id=126336,
+                    instruction_tokens=instruction,
+                    prefix_delimiters=prefix_delimiters,
+                    suffix_delimiters=suffix_delimiters,
+                    max_length=total_length,
+                    is_infill_task=True,
+                ),
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+            )
+        else:
+            trainer = dLLMTrainer(
+                model=model,
+                args=training_args,
+                data_collator=dLLMDataCollator(tokenizer=tokenizer, mask_token_id=126336, max_length=args.max_length),
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                optimizers=(optimizer, None),
+            )
+
         optimizer = torch.optim.AdamW(lora_params, lr = args.lora_lr, weight_decay = 0.1)
-        trainer = dLLMTrainer(
-        model=model,
-        args=training_args,
-        data_collator=dLLMDataCollator(tokenizer=tokenizer, mask_token_id=126336, max_length=args.max_length),
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        optimizers=(optimizer, None),
-        )
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
 

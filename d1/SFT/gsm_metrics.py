@@ -172,12 +172,17 @@ def parse_gsm_answers(json_path=None, json_data=None):
         total_correct_arithmetic,
     )
 
-file_format = "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/d1/SFT/results/top-prob-slide-datamix-gsm8k-5900/256_ours_random_0.5_{format}_generations.json"
+# file_format = "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/d1/SFT/results/hack-top-prob-slide-10-datamix-gsm8k-5900/128_ours_random_0.5_{format}_generations.json"
 # file_format = "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/d1/SFT/results/gsm8k/128_ours_random_0.5_{format}_generations.json"
+file_format = "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/d1/SFT/results/mdm_test/512_512_low_confidence_{format}_generations.json"
+# file_format = "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/d1/SFT/results/new-sampling-top-prob-slide-10-datamix-gsm8k-5900/128_ours_random_0.5_{format}_generations.json"
 
-# file_format = "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/d1/SFT/results/mdm_test/256_256_low_confidence_{format}_generations.json"
+# file_format = "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/d1/SFT/results/top-prob-slide-datamix-gsm8k-5900/1024_ours_random_0.5_{format}_generations.json"
+# file_format = "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/d1/SFT/results/hack3-top-prob-slide-alpha-5-datamix-gsm8k-5900/1024_ours_random_0.5_{format}_generations.json"
+# file_format = "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/d1/SFT/results/new_sampling/128_alpha_15.0_max_window_16_ours_random_0.5_{format}_generations.json"
+# file_format = "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/d1/SFT/results/test_new_sampling/128_alpha_15.0_max_window_32_ours_random_0.5_{format}_generations.json"
 
-n_partitions = 4
+n_partitions = 1
 
 metrics = []
 total_arithmetic_clauses = 0
