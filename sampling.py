@@ -367,6 +367,11 @@ def any_order_mask_insertion_tau_leaping_sampling(
     batch_size: int,
     max_length: int,
     return_trace: bool = False,
+    confidence_based_sampling: bool = True,  # whether to use confidence-based decoding
+    alpha: float = 5.0,  # hyperparameter for window size calculation
+    max_window: int = 32,  # Maximum window size for sliding window
+    confidence_method: str = "prob_diff",  # "position", "top_prob", "prob_diff", "entropy"
+    use_sliding_window: bool = False,  # whether to use sliding window for position selection
 ) -> SamplingResult:
     device = model.device
     xt = torch.full((batch_size, max_length), pad, dtype=torch.int64, device=device)
@@ -405,18 +410,104 @@ def any_order_mask_insertion_tau_leaping_sampling(
             xt = new_xt
             t = t + dt
             continue
-        # --- tau-leaping unmask via Poisson ---
-        counts = torch.poisson(unmask_rate * dt).long()
-        mask_pos = xt == mask
-        counts[~mask_pos.unsqueeze(-1).expand_as(counts)] = 0
-        counts[..., mask] = 0
-        sum_c = counts.sum(dim=2)
-        one_event = sum_c == 1
-        new_token = counts.argmax(dim=2)
-        new_xt = xt.clone()
-        new_xt[one_event] = new_token[one_event]
-        new_xt = torch.where(xt == pad, pad, new_xt)
-        new_xt = torch.where((xt != mask) & (xt != pad), xt, new_xt)
+
+        # --- confidence-based decoding ---
+        if confidence_based_sampling > 0.0:
+            # Confidence-based unmasking (vectorized)
+            mask_positions = (xt == mask)  # (B, L)
+            num_mask_positions = mask_positions.sum(dim=1)  # (B,)
+            
+            # 1. Determine number of tokens to unmask using Poisson
+            unmask_counts = torch.poisson(num_mask_positions.float() * dt).long()  # (B,)
+            
+            # 2. Calculate confidence based on selected method
+            if confidence_method == "position":
+                # Position-based confidence: position i / len(xt)
+                xt_len = (xt != pad).sum(dim=1)  # (B,) - current sequence lengths
+                position_indices = torch.arange(max_length, device=device).unsqueeze(0).expand(batch_size, -1)  # (B, L)
+                confidence = 1.0 - (position_indices.float() / xt_len.unsqueeze(1).float().clamp(min=1))  # (B, L)
+            
+            elif confidence_method == "top_prob":
+                # Top probability confidence
+                import torch.nn.functional as F
+                token_logits = unmask_rate  # (B, L, V) - use the unmask_rate as logits
+                unmask_probs = F.softmax(token_logits, dim=-1)  # (B, L, V)
+                confidence = unmask_probs.max(dim=-1)[0]  # (B, L)
+            
+            elif confidence_method == "prob_diff":
+                # Probability difference confidence (top - second top)
+                import torch.nn.functional as F
+                token_logits = unmask_rate  # (B, L, V)
+                unmask_probs = F.softmax(token_logits, dim=-1)  # (B, L, V)
+                top2_probs, _ = torch.topk(unmask_probs, k=2, dim=-1)  # (B, L, 2)
+                confidence = top2_probs[:, :, 0] - top2_probs[:, :, 1]  # (B, L)
+            
+            elif confidence_method == "entropy":
+                # Entropy-based confidence (lower entropy = higher confidence)
+                import torch.nn.functional as F
+                token_logits = unmask_rate  # (B, L, V)
+                unmask_probs = F.softmax(token_logits, dim=-1)  # (B, L, V)
+                entropy = -torch.sum(unmask_probs * torch.log(unmask_probs + 1e-10), dim=-1)  # (B, L)
+                confidence = -entropy  # (B, L) - negative entropy so lower entropy gives higher confidence
+            
+            else:
+                raise ValueError(f"Unknown confidence_method: {confidence_method}")
+            
+            # 3. Apply window constraint if enabled
+            if use_sliding_window:
+                # Calculate dynamic k for each batch
+                k_values = torch.minimum(
+                    torch.minimum(
+                        (alpha * unmask_counts).long(), 
+                        torch.tensor(max_window, device=device)
+                    ), num_mask_positions)  # (B,)
+                
+                # Get cumulative count of mask positions
+                mask_cumsum = mask_positions.cumsum(dim=1)  # (B, L)
+                
+                # Create window mask: position is eligible if it's a mask and within first k masks
+                is_within_window = mask_cumsum <= k_values.unsqueeze(1)  # (B, L)
+                window_mask = mask_positions & is_within_window  # (B, L)
+                
+                # Set confidence to -inf for positions outside the window or non-mask positions
+                confidence = torch.where(window_mask, confidence, torch.tensor(-float('inf'), device=device))
+            else:
+                # No window constraint - only mask positions are eligible
+                confidence = torch.where(mask_positions, confidence, torch.tensor(-float('inf'), device=device))
+            
+            new_xt = xt.clone()
+
+            # Vectorized unmasking
+            max_unmask = unmask_counts.max().item()
+            if max_unmask > 0:
+                # Get top-k indices for all batches
+                _, all_top_indices = torch.topk(confidence, k=max_unmask, dim=1, largest=True)  # (B, max_unmask)
+                
+                # Create mask for valid unmask operations
+                unmask_mask = torch.arange(max_unmask, device=device).unsqueeze(0) < unmask_counts.unsqueeze(1)  # (B, max_unmask)
+                
+                # Get most likely tokens
+                most_likely_tokens = unmask_rate.argmax(dim=-1)  # (B, L)
+                
+                # Gather the tokens to place at selected positions
+                selected_positions = all_top_indices[unmask_mask]  # Flattened valid positions
+                batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, max_unmask)[unmask_mask]  # Corresponding batch indices
+                
+                # Apply unmasking with sampled tokens
+                new_xt[batch_indices, selected_positions] = most_likely_tokens[batch_indices, selected_positions]
+        else:
+            # --- tau-leaping unmask via Poisson ---
+            counts = torch.poisson(unmask_rate * dt).long()
+            mask_pos = xt == mask
+            counts[~mask_pos.unsqueeze(-1).expand_as(counts)] = 0
+            counts[..., mask] = 0
+            sum_c = counts.sum(dim=2)
+            one_event = sum_c == 1
+            new_token = counts.argmax(dim=2)
+            new_xt = xt.clone()
+            new_xt[one_event] = new_token[one_event]
+            new_xt = torch.where(xt == pad, pad, new_xt)
+            new_xt = torch.where((xt != mask) & (xt != pad), xt, new_xt)
 
         # insertion only on non-last
         if i != steps - 1:

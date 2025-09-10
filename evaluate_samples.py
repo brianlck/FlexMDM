@@ -321,26 +321,14 @@ def main():
         mauve_score = None
         print("Mauve evaluation skipped")
     
-    if args.results_output:
-        results = {
-            "avg_entropy": avg_entropy, 
-            "avg_perplexity": avg_perp, 
-            "avg_reference_perplexity": avg_reference_perp,
-            "mauve_score": mauve_score
-        }
-        with open(args.results_output, "w", encoding="utf-8") as outf:
-            json.dump(results, outf, indent=2)
-        print(f"Saved metrics to {args.results_output}")
-    
-    # plot distribution of GPT2‐tokenized sentence lengths
+    # Calculate lengths early for use in filtered perplexities
     gpt2_tokenizer = AutoTokenizer.from_pretrained(gpt2_model_path)
     lengths = [len(gpt2_tokenizer.encode(s, add_special_tokens=False)) for s in samples]
-    plt.figure()
-    plt.hist(lengths, bins=50, color="skyblue", edgecolor="black")
-    plt.title("GPT2 Tokenized Sentence Length Distribution")
-    plt.savefig(args.length_plot_output)
-
+    
     # Conditionally create perplexity vs. tokenized length plot when perplexity is evaluated
+    filtered_perplexities = None
+    reference_filtered_perplexities = None
+    
     if args.perplexity and args.eval_mode == "sentence":
         idx = []
         val = []
@@ -350,7 +338,13 @@ def main():
                 if l >= i:
                     _val.append(perp)
             idx.append(i)
-            val.append(sum(_val) / len(_val))
+            val.append(sum(_val) / len(_val) if _val else 0)
+        
+        # Store filtered perplexities for JSON output
+        filtered_perplexities = {
+            "token_thresholds": idx,
+            "avg_perplexities": val
+        }
         
         plt.figure(figsize=(12, 6))
         
@@ -369,6 +363,12 @@ def main():
                         _ref_val.append(perp)
                 ref_idx.append(i)
                 ref_val.append(sum(_ref_val) / len(_ref_val) if _ref_val else 0)
+            
+            # Store reference filtered perplexities for JSON output
+            reference_filtered_perplexities = {
+                "token_thresholds": ref_idx,
+                "avg_perplexities": ref_val
+            }
             
             plt.scatter(ref_idx, ref_val, alpha=0.6, color="red", label="Reference samples")
         
@@ -398,6 +398,46 @@ def main():
         print(f"Saved perplexity vs. length scatter plot to {args.perplexity_plot_output}")
     elif args.eval_mode == "sentence":
         print("Perplexity plot skipped because the --perplexity flag was not provided")
+
+    if args.results_output:
+        results = {
+            "avg_entropy": avg_entropy, 
+            "avg_perplexity": avg_perp, 
+            "avg_reference_perplexity": avg_reference_perp,
+            "mauve_score": mauve_score,
+            "filtered_perplexities": filtered_perplexities,
+            "reference_filtered_perplexities": reference_filtered_perplexities
+        }
+        with open(args.results_output, "w", encoding="utf-8") as outf:
+            json.dump(results, outf, indent=2)
+        print(f"Saved metrics to {args.results_output}")
+    
+    # plot cumulative distribution of GPT2‐tokenized sentence lengths
+    # Create cumulative distribution
+    sorted_lengths = sorted(lengths)
+    cumulative_percentages = [i / len(sorted_lengths) * 100 for i in range(1, len(sorted_lengths) + 1)]
+    
+    # Save length data to JSON file
+    length_data = {
+        "lengths": lengths,
+        "sorted_lengths": sorted_lengths,
+        "cumulative_percentages": cumulative_percentages,
+        "num_samples": len(samples)
+    }
+    base, ext = os.path.splitext(args.length_plot_output)
+    length_data_output = f"{base}.json"
+    with open(length_data_output, "w", encoding="utf-8") as f:
+        json.dump(length_data, f, indent=2)
+    print(f"Saved length distribution data to {length_data_output}")
+    
+    plt.figure()
+    plt.plot(sorted_lengths, cumulative_percentages, color="skyblue", linewidth=2)
+    plt.title("Tokenized Sentence Length Cumulative Distribution")
+    plt.xlabel("Number of tokens")
+    plt.ylabel("Cumulative percentage (%)")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(args.length_plot_output)
 
     if args.eval_mode == "chunk":
         print(f"Evaluated in chunk mode over {len(target_samples)} segments (using pre-tokenized input)")

@@ -49,14 +49,23 @@ srun python evaluate_samples.py \
     --batch-size 32 \
     --results-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/${MODEL}_eval_results_${STEP}.json" \
     --length-plot-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/${MODEL}_length_plot_${STEP}.png" \
+    --perplexity \
     --eval-mode "sentence"
 
+srun python evaluate_samples.py \
+    --input-json "tmp/owt/${SAMPLER}/${MODEL}_generated_samples_${STEP}.json" \
+    --batch-size 32 \
+    --results-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/1M_linear/${MODEL}_eval_results_${STEP}.json" \
+    --length-plot-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/1M_linear/${MODEL}_length_plot_${STEP}.png" \
+    --perplexity \
+    --eval-mode "sentence"
 
 srun python evaluate_samples.py \
     --input-json "tmp/owt/${SAMPLER}/geometric_${MODEL}_generated_samples_${STEP}.json" \
     --batch-size 32 \
     --results-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/geometic_${MODEL}_eval_results_${STEP}.json" \
     --length-plot-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/geometic_${MODEL}_length_plot_${STEP}.png" \
+    --perplexity \
     --eval-mode "sentence"
 
 srun python evaluate_samples.py \
@@ -64,4 +73,5 @@ srun python evaluate_samples.py \
     --batch-size 32 \
     --results-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/cosine${MODEL}_eval_results_${STEP}.json" \
     --length-plot-output "/n/netscratch/albergo_lab/Lab/brianlck/interpretable-flow/tmp/owt/${SAMPLER}/cosine_${MODEL}_length_plot_${STEP}.png" \
+    --perplexity \
     --eval-mode "sentence"
